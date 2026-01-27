@@ -10,23 +10,16 @@ import React from 'react';
 import { Images } from '../assets/images';
 import AppButton from '../components/AppButton';
 import { useNavigation } from '@react-navigation/native';
-import { NativeStackNavigationProp } from '@react-navigation/native-stack';
-import { AppStackParamList } from '../navigation/AppNavigator';
-
-type OnBoardingScreenNavigationProp = NativeStackNavigationProp<
-  AppStackParamList,
-  'onBoard'
->;
 
 const OnBoarding = () => {
-  const navigation = useNavigation<OnBoardingScreenNavigationProp>();
+  const navigation = useNavigation();
 
   const handleSignUp = () => {
-    navigation.navigate('Auth', { screen: 'Signup' as const });
+    navigation.navigate('Auth' as never);
   };
 
   const handleLogin = () => {
-    navigation.navigate('Auth', { screen: 'Signin' as const });
+    navigation.navigate('Auth' as never, { screen: 'Signin' as never });
   };
 
   return (
