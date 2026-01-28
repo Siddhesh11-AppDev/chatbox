@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   View,
   Text,
@@ -7,34 +7,70 @@ import {
   FlatList,
   TouchableOpacity,
   StatusBar,
+  Alert,
 } from 'react-native';
 import Feather from 'react-native-vector-icons/Feather';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { AppStackParamList } from '../../../navigation/AppNavigator';
 import AppTextInput from '../../../components/AppTextInput';
+import { useAuth } from '../../../context/AuthContext';
+import { chatService } from '../../../firebase/chat.service';
 
 type Props = NativeStackScreenProps<AppStackParamList, 'userMsg'>;
+
+interface Message {
+  id?: string;
+  senderId: string;
+  receiverId: string;
+  text: string;
+  timestamp: any;
+  read: boolean;
+}
 
 const UserMessage = ({ route }: Props) => {
   const navigation = useNavigation();
   const { userData } = route.params;
+  const { user } = useAuth();
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [inputText, setInputText] = useState('');
 
-  const SKELETON_DATA = Array.from({ length: 10 });
+  useEffect(() => {
+    if (!user) return;
 
-  const renderItem = ({ index }) => {
-    const isRight = index % 2 === 0;
+    // Generate chat ID and listen to messages
+    const chatId = chatService.getChatId(user.uid, userData.uid);
+    const unsubscribe = chatService.listenToMessages(chatId, (newMessages) => {
+      setMessages(newMessages);
+    });
+
+    return () => unsubscribe();
+  }, [user, userData]);
+
+  const handleSendMessage = async () => {
+    if (!inputText.trim() || !user) return;
+
+    try {
+      await chatService.sendMessage(user.uid, userData.uid, inputText);
+      setInputText('');
+    } catch (error) {
+      Alert.alert('Error', 'Failed to send message');
+    }
+  };
+
+  const renderItem = ({ item }: { item: Message }) => {
+    const isCurrentUser = user && item.senderId === user.uid;
 
     return (
       <View
         style={[
           styles.messageRow,
-          isRight ? styles.rightAlign : styles.leftAlign,
+          isCurrentUser ? styles.rightAlign : styles.leftAlign,
         ]}
       >
-        {!isRight && (
+        {!isCurrentUser && (
           <Image 
-            source={{ uri: userData.profile_image }} 
+            source={{ uri: userData.profile_image || 'https://via.placeholder.com/150' }} 
             style={styles.avatar} 
           />
         )}
@@ -42,16 +78,20 @@ const UserMessage = ({ route }: Props) => {
         <View
           style={[
             styles.bubble,
-            isRight ? styles.rightBubble : styles.leftBubble,
-            index === 8 && styles.audioBubble,
+            isCurrentUser ? styles.rightBubble : styles.leftBubble,
           ]}
         >
           <Text style={styles.messageText}>
-            {index === 8 ? '🎤 Audio message' : `Message ${index + 1}`}
+            {item.text}
+          </Text>
+          <Text style={styles.timestamp}>
+            {item.timestamp?.toDate ? 
+              item.timestamp.toDate().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 
+              ''}
           </Text>
         </View>
 
-        {isRight && <View style={{ width: 40 }} />}
+        {isCurrentUser && <View style={{ width: 40 }} />}
       </View>
     );
   };
@@ -68,7 +108,7 @@ const UserMessage = ({ route }: Props) => {
 
         <View style={styles.headerCenter}>
           <Image 
-            source={{ uri: userData.profile_image }} 
+            source={{ uri: userData.profile_image || 'https://via.placeholder.com/150' }} 
             style={styles.headerAvatar} 
           />
           <View>
@@ -91,11 +131,12 @@ const UserMessage = ({ route }: Props) => {
 
       {/* Messages */}
       <FlatList
-        data={SKELETON_DATA}
-        keyExtractor={(_, i) => i.toString()}
+        data={messages}
+        keyExtractor={(item, index) => item.id ? item.id : `msg-${index}`}
         renderItem={renderItem}
         showsVerticalScrollIndicator={false}
         contentContainerStyle={styles.listContent}
+        inverted // Show newest messages at bottom
       />
 
       {/* Input Bar */}
@@ -105,16 +146,23 @@ const UserMessage = ({ route }: Props) => {
         </TouchableOpacity>
 
         <View style={styles.inputContainer}>
-          {/* <Text style={styles.inputPlaceholder}>Write your message</Text> */}
-          <AppTextInput/>
+          <AppTextInput
+            value={inputText}
+            onChangeText={setInputText}
+            placeholder="Write your message"
+            style={styles.textInput}
+          />
         </View>
 
         <TouchableOpacity style={styles.iconButton}>
           <Feather name="camera" size={20} color="#666" />
         </TouchableOpacity>
 
-        <TouchableOpacity style={styles.iconButton}>
-          <Feather name="mic" size={20} color="#666" />
+        <TouchableOpacity 
+          style={styles.sendButton} 
+          onPress={handleSendMessage}
+        >
+          <Feather name="send" size={20} color="#fff" />
         </TouchableOpacity>
       </View>
     </View>
@@ -191,6 +239,7 @@ const styles = StyleSheet.create({
     maxWidth: '70%',
     padding: 12,
     borderRadius: 12,
+    position: 'relative',
   },
   leftBubble: {
     backgroundColor: '#EEF1F4',
@@ -202,10 +251,13 @@ const styles = StyleSheet.create({
   },
   messageText: {
     fontSize: 14,
+    color: '#fff',
   },
-  audioBubble: {
-    height: 45,
-    justifyContent: 'center',
+  timestamp: {
+    fontSize: 10,
+    color: 'rgba(255,255,255,0.7)',
+    textAlign: 'right',
+    marginTop: 4,
   },
 
   /* Input */
@@ -228,8 +280,16 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     paddingHorizontal: 15,
   },
-  inputPlaceholder: {
-    color: '#AAA',
+  textInput: {
+    height: '100%',
     fontSize: 14,
+  },
+  sendButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: '#1DAA8E',
+    justifyContent: 'center',
+    alignItems: 'center',
   },
 });

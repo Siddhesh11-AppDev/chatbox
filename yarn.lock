@@ -2065,6 +2065,11 @@
   dependencies:
     react-native-url-polyfill "3.0.0"
 
+"@react-native-google-signin/google-signin@^16.1.1":
+  version "16.1.1"
+  resolved "https://registry.yarnpkg.com/@react-native-google-signin/google-signin/-/google-signin-16.1.1.tgz#40b9f8458a09cf8933132efd8a68f0a573167e92"
+  integrity sha512-lcHBnZ7uvCJiWtGooKOklo/4okqszWvJ0BatW1UaIe+ynmpVpp1lyJkvv1Mj08d39k4soaWuhZVNKjD/RFL34Q==
+
 "@react-native/assets-registry@0.83.1":
   version "0.83.1"
   resolved "https://registry.yarnpkg.com/@react-native/assets-registry/-/assets-registry-0.83.1.tgz#d210065b8d7939660f845fba3c6d9e5aa5998d13"

@@ -1,5 +1,5 @@
-import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, updateProfile } from '@react-native-firebase/auth';
-import { getFirestore, doc, setDoc } from '@react-native-firebase/firestore';
+import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, updateProfile, signOut } from '@react-native-firebase/auth';
+import { getFirestore, doc, setDoc, getDoc, updateDoc } from '@react-native-firebase/firestore';
 import { COLLECTIONS } from './collection';
 
 interface SignUpCredentials {
@@ -21,6 +21,10 @@ interface UserResponse {
 
 class AuthService {
     private auth = getAuth();
+
+    constructor() {
+        
+    }
 
     async signUp(credentials: SignUpCredentials): Promise<UserResponse> {
         try {
@@ -45,6 +49,7 @@ class AuthService {
                 email: credentials.email,
                 createdAt: new Date(),
                 uid: user.uid,
+                online: true, // Set user as online when they register
             });
 
             return {
@@ -67,6 +72,12 @@ class AuthService {
 
             const user = userCredential.user;
 
+            // Update user status to online
+            const firestore = getFirestore();
+            await updateDoc(doc(firestore, COLLECTIONS.USERS, user.uid), {
+                online: true,
+            });
+
             return {
                 uid: user.uid,
                 email: user.email,
@@ -77,8 +88,22 @@ class AuthService {
         }
     }
 
-    signOut(): Promise<void> {
-        return this.auth.signOut();
+    async signOut(): Promise<void> {
+        try {
+            // Update user status to offline before signing out
+            const user = this.getCurrentUser();
+            if (user) {
+                const firestore = getFirestore();
+                await updateDoc(doc(firestore, COLLECTIONS.USERS, user.uid), {
+                    online: false,
+                });
+            }
+            
+            await signOut(this.auth);
+        } catch (error) {
+            console.error('Sign out error:', error);
+            await signOut(this.auth); // Try to sign out anyway
+        }
     }
 
     getCurrentUser() {
@@ -95,6 +120,10 @@ class AuthService {
                 return 'Password is too weak. Please use at least 6 characters.';
             case 'auth/network-request-failed':
                 return 'Network error. Please check your connection.';
+            case 'auth/user-not-found':
+                return 'No user found with this email.';
+            case 'auth/wrong-password':
+                return 'Incorrect password.';
             default:
                 return error.message || 'An error occurred. Please try again.';
         }

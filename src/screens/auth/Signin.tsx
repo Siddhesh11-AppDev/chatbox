@@ -106,7 +106,7 @@ const Signin = () => {
       console.error('Login Error:', error);
       Alert.alert(
         'Error',
-        error.message || 'An error occurred during login. Please try again.'
+        error.message || 'An error occurred during login. Please try again.',
       );
     } finally {
       setLoading(false);
@@ -155,9 +155,11 @@ const Signin = () => {
               <Text style={{ fontSize: 18, fontWeight: '600' }}>
                 Log in to <Text>Chatbox</Text>
               </Text>
-              <Text style={{ fontSize: 16, color: '#797C7B', textAlign: 'center' }}>
-                Welcome back! Sign in using your social account or email to continue
-                us
+              <Text
+                style={{ fontSize: 16, color: '#797C7B', textAlign: 'center' }}
+              >
+                Welcome back! Sign in using your social account or email to
+                continue us
               </Text>
             </View>
             <View style={styles.socialRow}>
@@ -167,34 +169,43 @@ const Signin = () => {
               <TouchableOpacity style={styles.socialIcon}>
                 <Image source={Images.GoogleImg} style={styles.socialImage} />
               </TouchableOpacity>
+
               <TouchableOpacity style={styles.socialIcon}>
                 <Image source={Images.AppleBlack} style={styles.socialImage} />
               </TouchableOpacity>
             </View>
 
             <View style={{ marginVertical: '20%' }}>
-              <Text style={{ color: '#24786D', fontWeight: 500 }}>Your Email</Text>
+              <Text style={{ color: '#24786D', fontWeight: 500 }}>
+                Your Email
+              </Text>
               <AppTextInput
                 value={formData.email}
-                onChangeText={(text) => handleInputChange('email', text)}
+                onChangeText={text => handleInputChange('email', text)}
                 placeholder="Enter your email"
                 keyboardType="email-address"
                 autoCapitalize="none"
                 error={errors.email}
+                inputMode="email"
+                autoComplete="email"
               />
-              <Text style={{ color: '#24786D', fontWeight: 500 }}>Password</Text>
+              <Text style={{ color: '#24786D', fontWeight: 500 }}>
+                Password
+              </Text>
               <AppTextInput
                 value={formData.password}
-                onChangeText={(text) => handleInputChange('password', text)}
+                onChangeText={text => handleInputChange('password', text)}
                 placeholder="Enter your password"
                 secureTextEntry
                 error={errors.password}
+                inputMode="text"
+                autoComplete="password"
               />
             </View>
-            
+
             <View style={{ marginBottom: 20 }}>
               <AppButton
-                title={loading ? "Logging In..." : "Log in"}
+                title={loading ? 'Logging In...' : 'Log in'}
                 onPress={handleLogin}
                 backgroundColor="#24786D"
                 textColor="#FFF"

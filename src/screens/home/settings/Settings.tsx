@@ -11,6 +11,11 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Feather from 'react-native-vector-icons/Feather';
 import MaterialDesignIcons from 'react-native-vector-icons/MaterialCommunityIcons';
+import AppButton from '../../../components/AppButton';
+
+import { authService } from '../../../firebase/auth.service';
+import { useAuth } from '../../../context/AuthContext';
+
 
 const settingsOptions = [
   {
@@ -53,6 +58,8 @@ const settingsOptions = [
 
 export default function Settings() {
   const navigation = useNavigation();
+  const { user } = useAuth();
+
   const renderItem = ({ item }) => (
     <TouchableOpacity style={styles.row} activeOpacity={0.7}>
       <View style={styles.iconWrapper}>
@@ -83,12 +90,18 @@ export default function Settings() {
         {/* Profile */}
         <View style={styles.profileRow}>
           <Image
-            source={{ uri: 'https://randomuser.me/api/portraits/men/45.jpg' }}
+            source={{ 
+              uri: user?.photoURL || 'https://randomuser.me/api/portraits/men/45.jpg' 
+            }}
             style={styles.profileImage}
           />
           <View style={{ flex: 1, marginLeft: 12 }}>
-            <Text style={styles.profileName}>Nazrul Islam</Text>
-            <Text style={styles.profileStatus}>Never give up 💪</Text>
+            <Text style={styles.profileName}>
+              {user?.displayName || 'User'}
+            </Text>
+            <Text style={styles.profileStatus}>
+              {user?.email || 'Online'}
+            </Text>
           </View>
           <MaterialDesignIcons name="qrcode-scan" size={22} color="#5F9EA0" />
         </View>
@@ -100,6 +113,7 @@ export default function Settings() {
           renderItem={renderItem}
           showsVerticalScrollIndicator={false}
         />
+        <AppButton title={'Log Out'} backgroundColor='red' textColor='white' onPress={() => { authService.signOut(); }}/>
       </View>
     </SafeAreaView>
   );

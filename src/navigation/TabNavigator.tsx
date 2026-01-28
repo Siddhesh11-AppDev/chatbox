@@ -10,7 +10,16 @@ import AntDesign from 'react-native-vector-icons/AntDesign';
 import Ionicons from 'react-native-vector-icons/Ionicons';
 import Feather from 'react-native-vector-icons/Feather';
 
-const Tab = createBottomTabNavigator();
+// Extend the Tab navigator to include the userMsg route
+export type AppStackParamList = {
+  Messages: undefined;
+  Calls: undefined;
+  Contacts: undefined;
+  Settings: undefined;
+  userMsg: { userData: any };
+};
+
+const Tab = createBottomTabNavigator<AppStackParamList>();
 
 /* ---------- Tab Icon Component ---------- */
 const TabIcon = ({ IconComponent, iconName, label, focused }: any) => {

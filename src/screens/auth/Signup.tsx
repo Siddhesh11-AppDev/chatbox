@@ -130,18 +130,8 @@ const Signup = () => {
         password: formData.password,
       });
 
-      Alert.alert(
-        'Success',
-        'Account created successfully! You can now log in.',
-        [
-          {
-            text: 'OK',
-            onPress: () => {
-              navigation.navigate('Signin' as never);
-            },
-          },
-        ]
-      );
+      // Navigate directly to Signin page after successful signup
+      navigation.navigate('Signin' as never);
     } catch (error: any) {
       console.error('Signup Error:', error);
       Alert.alert(
@@ -207,6 +197,9 @@ const Signup = () => {
                 onChangeText={(text) => handleInputChange('name', text)}
                 placeholder="Enter your name"
                 error={errors.name}
+                inputMode="text"
+                autoCapitalize="words"
+                autoComplete="name"
               />
               
               <Text style={{ color: '#24786D', fontWeight: 500 }}>Your Email</Text>
@@ -217,6 +210,8 @@ const Signup = () => {
                 keyboardType="email-address"
                 autoCapitalize="none"
                 error={errors.email}
+                inputMode="email"
+                autoComplete="email"
               />
               
               <Text style={{ color: '#24786D', fontWeight: 500 }}>Password</Text>
@@ -226,6 +221,8 @@ const Signup = () => {
                 placeholder="Enter your password"
                 secureTextEntry
                 error={errors.password}
+                inputMode="text"
+                autoComplete="new-password"
               />
               
               <Text style={{ color: '#24786D', fontWeight: 500 }}>
@@ -237,6 +234,8 @@ const Signup = () => {
                 placeholder="Confirm your password"
                 secureTextEntry
                 error={errors.confirmPassword}
+                inputMode="text"
+                autoComplete="new-password"
               />
             </View>
 

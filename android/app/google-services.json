@@ -12,7 +12,20 @@
           "package_name": "com.chatbox"
         }
       },
-      "oauth_client": [],
+      "oauth_client": [
+        {
+          "client_id": "702106057849-6hsjv615uj1nqh3ptvr5b3ngltf34efg.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.chatbox",
+            "certificate_hash": "130a1d6dbce11bdd3d6a5f00d1118259e7bb3125"
+          }
+        },
+        {
+          "client_id": "702106057849-i7thihui34fbg8a15g57d713uqqqpjjf.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
       "api_key": [
         {
           "current_key": "AIzaSyCW7zHa6NnnpVMS7V5xgbugZmlQReo3tjI"
@@ -20,7 +33,12 @@
       ],
       "services": {
         "appinvite_service": {
-          "other_platform_oauth_client": []
+          "other_platform_oauth_client": [
+            {
+              "client_id": "702106057849-i7thihui34fbg8a15g57d713uqqqpjjf.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
         }
       }
     }
