@@ -8,23 +8,197 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import React, { useRef } from 'react';
-import { contactData } from '../../../api/JsonData';
+import React, { useEffect, useRef, useState } from 'react';
+import {
+  getFirestore,
+  collection,
+  getDocs,
+  query,
+  where,
+  onSnapshot,
+  orderBy,
+  limit,
+  startAfter,
+} from '@react-native-firebase/firestore';
 import Feather from 'react-native-vector-icons/Feather';
 import FontAwesome from 'react-native-vector-icons/FontAwesome';
-import Swipeable from 'react-native-gesture-handler/Swipeable';
 import { useNavigation } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
-import { AuthStackParamList } from '../../../navigation/AuthNavigator';
+import { Swipeable } from 'react-native-gesture-handler';
+import { useAuth } from '../../../context/AuthContext';
+import { AppStackParamList } from '../../../navigation/TabNavigator';
+import { chatService } from '../../../firebase/chat.service';
+import { contactData } from '../../../api/JsonData';
+import { getUserAvatar } from '../../../utils/avatarUtils';
 
 type MessagesNavigationProp = NativeStackNavigationProp<
-  AuthStackParamList,
-  'Messages'
+  AppStackParamList,
+  'Messages' | 'userMsg'
 >;
+
+interface User {
+  uid: string;
+  name: string;
+  email: string;
+  profile_image?: string;
+  online?: boolean;
+  last_message?: string; // must always be string
+  last_message_time?: any;
+  unread_count?: number;
+}
 
 const Messages = () => {
   const scrollY = useRef(new Animated.Value(0)).current;
   const navigation = useNavigation<MessagesNavigationProp>();
+  const { user } = useAuth();
+  const [users, setUsers] = useState<User[]>([]);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [unreadCounts, setUnreadCounts] = useState<{[key: string]: number}>({});
+  const [lastMessages, setLastMessages] = useState<{[key: string]: string}>({});
+
+  useEffect(() => {
+    if (!user) return;
+
+    const usersRef = collection(getFirestore(), 'users');
+    const q = query(usersRef, where('uid', '!=', user.uid));
+
+    const mapUser = (userData: any): User => ({
+      uid: userData.uid,
+      name: userData.name || '',
+      email: userData.email || '',
+      profile_image:
+        userData.profile_image || getUserAvatar({ displayName: userData.name, photoURL: userData.profile_image }),
+      online: !!userData.online,
+      last_message:
+        typeof userData.last_message === 'string' ? userData.last_message : '',
+      last_message_time: userData.last_message_time || null,
+      unread_count: userData.unread_count || 0,
+    });
+
+    // Initial fetch
+    const fetchUsers = async () => {
+      try {
+        const snapshot = await getDocs(q);
+        const userList: User[] = [];
+        snapshot.forEach((doc: any) => {
+          userList.push(mapUser(doc.data()));
+        });
+        setUsers(userList);
+      } catch (error) {
+        console.error('Error fetching users:', error);
+      }
+    };
+
+    fetchUsers();
+
+    // Real-time listener
+    const unsubscribe = onSnapshot(q, snapshot => {
+      const userList: User[] = [];
+      snapshot.forEach((doc: any) => {
+        userList.push(mapUser(doc.data()));
+      });
+      setUsers(userList);
+    });
+
+    return () => unsubscribe();
+  }, [user]);
+
+  // Set up listeners for unread message counts
+  useEffect(() => {
+    if (!user || !users.length) return;
+
+    const unsubs: any[] = [];
+
+    users.forEach((u: User) => {
+      const chatId = chatService.getChatId(user.uid, u.uid);
+      const messagesRef = collection(
+        getFirestore(),
+        `chats/${chatId}/messages`
+      );
+
+      const q = query(
+        messagesRef,
+        where('receiverId', '==', user.uid), // Messages sent to current user
+        where('read', '==', false) // Only unread messages
+      );
+
+      const unsubscribe = onSnapshot(q, (snapshot) => {
+        const count = snapshot?.size || 0; // Safely access the size property
+        setUnreadCounts(prev => ({
+          ...prev,
+          [u.uid]: count
+        }));
+      });
+
+      unsubs.push(unsubscribe);
+    });
+
+    // Clean up all listeners when component unmounts or users list changes
+    return () => {
+      unsubs.forEach(unsub => unsub());
+    };
+  }, [users, user]);
+
+  // Set up listeners for last messages
+  useEffect(() => {
+    if (!user || !users.length) return;
+
+    const unsubs: any[] = [];
+
+    users.forEach((u: User) => {
+      const chatId = chatService.getChatId(user.uid, u.uid);
+      const messagesRef = collection(
+        getFirestore(),
+        `chats/${chatId}/messages`
+      );
+
+      const q = query(
+        messagesRef,
+        orderBy('timestamp', 'desc'),
+        limit(1)
+      );
+
+      const unsubscribe = onSnapshot(q, (snapshot) => {
+        if (!snapshot.empty) {
+          const lastMessageDoc = snapshot.docs[0];
+          const messageData = lastMessageDoc.data();
+          setLastMessages(prev => ({
+            ...prev,
+            [u.uid]: messageData.text || ''
+          }));
+        } else {
+          // If no messages in the chat, set empty string
+          setLastMessages(prev => ({
+            ...prev,
+            [u.uid]: ''
+          }));
+        }
+      });
+
+      unsubs.push(unsubscribe);
+    });
+
+    // Clean up all listeners when component unmounts or users list changes
+    return () => {
+      unsubs.forEach(unsub => unsub());
+    };
+  }, [users, user]);
+
+  // Function to get unread count for a specific user
+  const getUnreadCount = (userId: string) => {
+    return unreadCounts[userId] || 0;
+  };
+
+  // Function to get last message for a specific user
+  const getLastMessage = (userId: string) => {
+    const lastMsg = lastMessages[userId];
+    if (lastMsg) {
+      return lastMsg;
+    }
+    // Fallback to original last_message if no Firebase message exists
+    const userObj = users.find(u => u.uid === userId);
+    return userObj?.last_message || 'Tap to start chatting';
+  };
 
   const renderRightActions = () => (
     <View style={styles.swipeActions}>
@@ -37,7 +211,13 @@ const Messages = () => {
     </View>
   );
 
-  const handleMessagePress = (item: (typeof contactData)[0]) => {
+  const filteredUsers = users.filter(
+    u =>
+      u.name?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      u.email?.toLowerCase().includes(searchQuery.toLowerCase()),
+  );
+
+  const handleMessagePress = (item: User) => {
     navigation.navigate('userMsg', {
       userData: item,
     });
@@ -58,18 +238,18 @@ const Messages = () => {
         </TouchableOpacity>
       </View>
 
-      {/* Stories */}
+      {/* Stories - Now showing users with unread messages */}
       <View style={styles.storiesContainer}>
         <FlatList
-          data={contactData.filter(i => i.unread_count > 0)}
+          data={contactData}
           horizontal
-          keyExtractor={item => item._id.toString()}
+          keyExtractor={item => item._id}
           showsHorizontalScrollIndicator={false}
           renderItem={({ item }) => (
             <View style={styles.storyItem}>
               <View style={styles.storyRing}>
                 <Image
-                  source={{ uri: item.profile_image }}
+                  source={{ uri: item.profile_image || getUserAvatar({ displayName: item.name, photoURL: item.profile_image }) }}
                   style={styles.storyImage}
                 />
               </View>
@@ -90,8 +270,8 @@ const Messages = () => {
       <StatusBar barStyle="light-content" backgroundColor="#000" />
 
       <Animated.FlatList
-        data={contactData}
-        keyExtractor={item => item._id.toString()}
+        data={filteredUsers}
+        keyExtractor={(item, index) => item.uid || index.toString()}
         showsVerticalScrollIndicator={false}
         ListHeaderComponent={ListHeader}
         contentContainerStyle={styles.listContent}
@@ -107,22 +287,30 @@ const Messages = () => {
             >
               <View style={styles.avatarContainer}>
                 <Image
-                  source={{ uri: item.profile_image }}
+                  source={{ uri: item.profile_image || getUserAvatar({ displayName: item.name, photoURL: item.profile_image }) }}
                   style={styles.avatar}
                 />
-                {item.unread_count > 0 && <View style={styles.greenDot} />}
+                {item.online && <View style={styles.greenDot} />}
               </View>
 
               <View style={styles.messageContent}>
                 <Text style={styles.contactName}>{item.name}</Text>
                 <Text style={styles.lastMessage} numberOfLines={1}>
-                  {item.last_message}
+                  {getLastMessage(item.uid) || 'Tap to start chatting'}
                 </Text>
               </View>
 
-              {item.unread_count > 0 && (
+              {item.online && (
+                <View style={styles.onlineIndicator}>
+                  <Text style={styles.onlineText}>ONLINE</Text>
+                </View>
+              )}
+
+              {getUnreadCount(item.uid) > 0 && (
                 <View style={styles.unreadBadge}>
-                  <Text style={styles.unreadCount}>{item.unread_count}</Text>
+                  <Text style={styles.unreadCount}>
+                    {getUnreadCount(item.uid) > 9 ? '9+' : getUnreadCount(item.uid)}
+                  </Text>
                 </View>
               )}
             </TouchableOpacity>
@@ -198,6 +386,7 @@ const styles = StyleSheet.create({
 
   listContent: {
     backgroundColor: '#FFF',
+    flex: 1,
   },
 
   messageItem: {
@@ -206,7 +395,8 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20,
     paddingVertical: 14,
     borderBottomWidth: 0.5,
-    borderBottomColor: '#EEE',
+    borderBottomColor: 'rgba(0,0,0,0.1)',
+    // backgroundColor:'grey'
   },
   avatarContainer: {
     marginRight: 15,
@@ -274,329 +464,18 @@ const styles = StyleSheet.create({
     height: 40,
     borderRadius: 30,
   },
+
+  onlineIndicator: {
+    backgroundColor: '#4CAF50',
+    borderRadius: 10,
+    minWidth: 50,
+    height: 20,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  onlineText: {
+    color: '#FFF',
+    fontSize: 10,
+    fontWeight: 'bold',
+  },
 });
-
-
-
-// import {
-//   Animated,
-//   FlatList,
-//   Image,
-//   StatusBar,
-//   StyleSheet,
-//   Text,
-//   TouchableOpacity,
-//   View,
-// } from 'react-native';
-// import React, { useRef, useEffect, useState } from 'react';
-// import { getFirestore, collection, getDocs, query, where } from '@react-native-firebase/firestore';
-// import { COLLECTIONS } from '../../../firebase/collection';
-// import Feather from 'react-native-vector-icons/Feather';
-// import FontAwesome from 'react-native-vector-icons/FontAwesome';
-// import Swipeable from 'react-native-gesture-handler/Swipeable';
-// import { useNavigation } from '@react-navigation/native';
-// import { NativeStackNavigationProp } from '@react-navigation/native-stack';
-// import { AuthStackParamList } from '../../../navigation/AuthNavigator';
-// import { useAuth } from '../../../context/AuthContext';
-
-// type MessagesNavigationProp = NativeStackNavigationProp<
-//   AuthStackParamList,
-//   'userMsg'
-// >;
-
-// interface User {
-//   uid: string;
-//   name: string;
-//   email: string;
-//   profile_image?: string;
-//   online?: boolean;
-//   last_message?: string;
-//   last_message_time?: any;
-// }
-
-// const Messages = () => {
-//   const scrollY = useRef(new Animated.Value(0)).current;
-//   const navigation = useNavigation<MessagesNavigationProp>();
-//   const { user } = useAuth();
-//   const [users, setUsers] = useState<User[]>([]);
-
-//   useEffect(() => {
-//     const fetchUsers = async () => {
-//       if (!user) return;
-      
-//       try {
-//         // Get all users except the current user
-//         const usersRef = collection(getFirestore(), COLLECTIONS.USERS);
-//         const q = query(usersRef, where('uid', '!=', user.uid));
-//         const snapshot = await getDocs(q);
-        
-//         const userList: User[] = [];
-//         snapshot.forEach((doc) => {
-//           const userData = doc.data();
-//           userList.push({
-//             uid: userData.uid,
-//             name: userData.name,
-//             email: userData.email,
-//             profile_image: userData.profile_image || 'https://via.placeholder.com/150',
-//             online: userData.online || false,
-//           });
-//         });
-        
-//         setUsers(userList);
-//       } catch (error) {
-//         console.error('Error fetching users:', error);
-//       }
-//     };
-
-//     fetchUsers();
-//   }, [user]);
-
-//   const handleMessagePress = (item: User) => {
-//     navigation.navigate('userMsg', {
-//       userData: item,
-//     });
-//   };
-
-//   const renderRightActions = () => (
-//     <View style={styles.swipeActions}>
-//       <TouchableOpacity style={styles.muteButton}>
-//         <Feather name="bell" size={22} color="#FFF" />
-//       </TouchableOpacity>
-//       <TouchableOpacity style={styles.deleteButton}>
-//         <Feather name="trash-2" size={22} color="#FFF" />
-//       </TouchableOpacity>
-//     </View>
-//   );
-
-//   const ListHeader = () => (
-//     <>
-//       {/* Header */}
-//       <View style={styles.fixedHeader}>
-//         <TouchableOpacity style={styles.searchIcon}>
-//           <Feather name="search" size={22} color="#FFF" />
-//         </TouchableOpacity>
-
-//         <Text style={styles.headerTitle}>Home</Text>
-
-//         <TouchableOpacity onPress={() => navigation.navigate('Settings')}>
-//           <FontAwesome name="user-circle" size={34} color="#FFF" />
-//         </TouchableOpacity>
-//       </View>
-
-//       {/* Stories */}
-//       <View style={styles.storiesContainer}>
-//         <FlatList
-//           data={users.slice(0, 5)} // Show first 5 users as stories
-//           horizontal
-//           keyExtractor={item => item.uid}
-//           showsHorizontalScrollIndicator={false}
-//           renderItem={({ item }) => (
-//             <View style={styles.storyItem}>
-//               <View style={styles.storyRing}>
-//                 <Image
-//                   source={{ uri: item.profile_image || 'https://via.placeholder.com/150' }}
-//                   style={styles.storyImage}
-//                 />
-//               </View>
-//               <Text style={styles.storyName} numberOfLines={1}>
-//                 {item.name}
-//               </Text>
-//             </View>
-//           )}
-//         />
-//       </View>
-
-//       <View style={styles.whiteCardTop} />
-//     </>
-//   );
-
-//   return (
-//     <View style={{ flex: 1, backgroundColor: '#000' }}>
-//       <StatusBar barStyle="light-content" backgroundColor="#000" />
-
-//       <Animated.FlatList
-//         data={users}
-//         keyExtractor={item => item.uid}
-//         showsVerticalScrollIndicator={false}
-//         ListHeaderComponent={ListHeader}
-//         contentContainerStyle={styles.listContent}
-//         onScroll={Animated.event(
-//           [{ nativeEvent: { contentOffset: { y: scrollY } } }],
-//           { useNativeDriver: true },
-//         )}
-//         renderItem={({ item }) => (
-//           <Swipeable renderRightActions={renderRightActions}>
-//             <TouchableOpacity
-//               style={styles.messageItem}
-//               onPress={() => handleMessagePress(item)}
-//             >
-//               <View style={styles.avatarContainer}>
-//                 <Image
-//                   source={{ uri: item.profile_image || 'https://via.placeholder.com/150' }}
-//                   style={styles.avatar}
-//                 />
-//                 {item.online && <View style={styles.greenDot} />}
-//               </View>
-
-//               <View style={styles.messageContent}>
-//                 <Text style={styles.contactName}>{item.name}</Text>
-//                 <Text style={styles.lastMessage} numberOfLines={1}>
-//                   {item.last_message || 'Tap to start chatting'}
-//                 </Text>
-//               </View>
-
-//               {item.online && (
-//                 <View style={styles.onlineIndicator}>
-//                   <Text style={styles.onlineText}>ONLINE</Text>
-//                 </View>
-//               )}
-//             </TouchableOpacity>
-//           </Swipeable>
-//         )}
-//       />
-//     </View>
-//   );
-// };
-
-// export default Messages;
-
-// // ... rest of the styles remain the same
-
-// const styles = StyleSheet.create({
-//   fixedHeader: {
-//     flexDirection: 'row',
-//     justifyContent: 'space-between',
-//     alignItems: 'center',
-//     paddingHorizontal: 20,
-//     height: 80,
-//     backgroundColor: '#000',
-//   },
-//   searchIcon: {
-//     height: 40,
-//     width: 40,
-//     borderRadius: 20,
-//     borderWidth: 1,
-//     borderColor: '#FFF',
-//     justifyContent: 'center',
-//     alignItems: 'center',
-//   },
-//   headerTitle: {
-//     color: '#FFF',
-//     fontSize: 20,
-//     fontWeight: '600',
-//   },
-
-//   storiesContainer: {
-//     // paddingVertical: 20,
-//     height: 120,
-//     paddingLeft: 10,
-//     backgroundColor: '#000',
-//     borderBottomLeftRadius: -50,
-//   },
-//   storyItem: {
-//     alignItems: 'center',
-//     marginHorizontal: 8,
-//   },
-//   storyRing: {
-//     borderWidth: 3,
-//     borderColor: '#FFD54F',
-//     borderRadius: 40,
-//     padding: 3,
-//   },
-//   storyImage: {
-//     width: 60,
-//     height: 60,
-//     borderRadius: 30,
-//   },
-//   storyName: {
-//     color: '#FFF',
-//     fontSize: 12,
-//     marginTop: 6,
-//     maxWidth: 60,
-//   },
-
-//   whiteCardTop: {
-//     height: 30,
-//     backgroundColor: '#FFF',
-//     position: 'relative',
-//   },
-
-//   listContent: {
-//     backgroundColor: '#FFF',
-//   },
-
-//   messageItem: {
-//     flexDirection: 'row',
-//     alignItems: 'center',
-//     paddingHorizontal: 20,
-//     paddingVertical: 14,
-//     borderBottomWidth: 0.5,
-//     borderBottomColor: '#EEE',
-//   },
-//   avatarContainer: {
-//     marginRight: 15,
-//   },
-//   avatar: {
-//     width: 50,
-//     height: 50,
-//     borderRadius: 25,
-//   },
-//   greenDot: {
-//     position: 'absolute',
-//     bottom: 2,
-//     right: 2,
-//     width: 10,
-//     height: 10,
-//     borderRadius: 5,
-//     backgroundColor: '#0FE16D',
-//   },
-//   messageContent: {
-//     flex: 1,
-//   },
-//   contactName: {
-//     fontSize: 16,
-//     fontWeight: '600',
-//     color: '#000',
-//   },
-//   lastMessage: {
-//     fontSize: 14,
-//     color: '#666',
-//   },
-//   onlineIndicator: {
-//     backgroundColor: '#4CAF50',
-//     borderRadius: 10,
-//     minWidth: 50,
-//     height: 20,
-//     justifyContent: 'center',
-//     alignItems: 'center',
-//   },
-//   onlineText: {
-//     color: '#FFF',
-//     fontSize: 10,
-//     fontWeight: 'bold',
-//   },
-
-//   swipeActions: {
-//     flexDirection: 'row',
-//     backgroundColor: '#EEE',
-//     width: 100,
-//     justifyContent: 'space-evenly',
-//     alignItems: 'center',
-//   },
-//   muteButton: {
-//     width: 40,
-//     backgroundColor: '#000',
-//     justifyContent: 'center',
-//     alignItems: 'center',
-//     height: 40,
-//     borderRadius: 30,
-//   },
-//   deleteButton: {
-//     width: 40,
-//     backgroundColor: '#F04A4C',
-//     justifyContent: 'center',
-//     alignItems: 'center',
-//     height: 40,
-//     borderRadius: 30,
-//   },
-// });

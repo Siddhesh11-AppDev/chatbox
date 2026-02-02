@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import {
   View,
   Text,
@@ -8,14 +8,21 @@ import {
   TouchableOpacity,
   StatusBar,
   Alert,
+  KeyboardAvoidingView,
+  Platform,
 } from 'react-native';
 import Feather from 'react-native-vector-icons/Feather';
-import { useNavigation, useRoute } from '@react-navigation/native';
+import AntDesign from 'react-native-vector-icons/AntDesign';
+import Entypo from 'react-native-vector-icons/Entypo';
+import MaterialIcons from 'react-native-vector-icons/MaterialIcons';
+import { useNavigation } from '@react-navigation/native';
 import { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { AppStackParamList } from '../../../navigation/AppNavigator';
 import AppTextInput from '../../../components/AppTextInput';
 import { useAuth } from '../../../context/AuthContext';
 import { chatService } from '../../../firebase/chat.service';
+import firestore, { getDocs, query, where } from '@react-native-firebase/firestore';
+import { getUserAvatar } from '../../../utils/avatarUtils';
 
 type Props = NativeStackScreenProps<AppStackParamList, 'userMsg'>;
 
@@ -32,16 +39,23 @@ const UserMessage = ({ route }: Props) => {
   const navigation = useNavigation();
   const { userData } = route.params;
   const { user } = useAuth();
+
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputText, setInputText] = useState('');
+  const [isFocused, setIsFocused] = useState(false);
 
+  const flatListRef = useRef<FlatList>(null);
+
+  // Listen to messages
   useEffect(() => {
     if (!user) return;
 
-    // Generate chat ID and listen to messages
     const chatId = chatService.getChatId(user.uid, userData.uid);
-    const unsubscribe = chatService.listenToMessages(chatId, (newMessages) => {
+    const unsubscribe = chatService.listenToMessages(chatId, newMessages => {
       setMessages(newMessages);
+      setTimeout(() => {
+        flatListRef.current?.scrollToEnd({ animated: true });
+      }, 100);
     });
 
     return () => unsubscribe();
@@ -51,65 +65,217 @@ const UserMessage = ({ route }: Props) => {
     if (!inputText.trim() || !user) return;
 
     try {
-      await chatService.sendMessage(user.uid, userData.uid, inputText);
+      const messageText = inputText.trim();
       setInputText('');
+      setIsFocused(false);
+      await chatService.sendMessage(user.uid, userData.uid, messageText);
+      setTimeout(() => {
+        flatListRef.current?.scrollToEnd({ animated: true });
+      }, 100);
     } catch (error) {
       Alert.alert('Error', 'Failed to send message');
     }
   };
 
-  const renderItem = ({ item }: { item: Message }) => {
+  const formatTime = (timestamp: any) => {
+    if (!timestamp) return '';
+
+    let date;
+
+    // Handle different timestamp formats
+    if (timestamp.toDate) {
+      // Firestore Timestamp
+      date = timestamp.toDate();
+    } else if (timestamp instanceof Date) {
+      // JavaScript Date object
+      date = timestamp;
+    } else if (timestamp._seconds) {
+      // Firestore timestamp object
+      date = new Date(timestamp._seconds * 1000);
+    } else {
+      return '';
+    }
+
+    return date.toLocaleTimeString([], {
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: true,
+    });
+  };
+
+  const formatDate = (timestamp: any) => {
+    if (!timestamp) return '';
+
+    let date;
+
+    // Handle different timestamp formats
+    if (timestamp.toDate) {
+      date = timestamp.toDate();
+    } else if (timestamp instanceof Date) {
+      date = timestamp;
+    } else if (timestamp._seconds) {
+      date = new Date(timestamp._seconds * 1000);
+    } else {
+      return '';
+    }
+
+    const today = new Date();
+    const messageDate = new Date(date);
+
+    if (messageDate.toDateString() === today.toDateString()) {
+      return 'Today';
+    } else {
+      return messageDate.toLocaleDateString([], {
+        month: 'short',
+        day: 'numeric',
+      });
+    }
+  };
+
+
+
+  // Mark messages as read when user opens the chat
+  useEffect(() => {
+    if (!user) return;
+
+    const chatId = chatService.getChatId(user.uid, userData.uid);
+    
+    const markMessagesAsRead = async () => {
+      try {
+        console.log('Attempting to mark messages as read for chat:', chatId);
+        console.log('Current user ID:', user.uid);
+        console.log('Chat partner ID:', userData.uid);
+        
+        const messagesRef = firestore()
+          .collection('chats')
+          .doc(chatId)
+          .collection('messages');
+        
+        const q = query(
+          messagesRef,
+          where('receiverId', '==', user.uid), // Messages sent to current user
+          where('read', '==', false) // That are unread
+        );
+        
+        const snapshot = await getDocs(q);
+        console.log(`Found ${snapshot.size} unread messages to mark as read`);
+        
+        if (snapshot.empty) {
+          console.log('No unread messages found');
+          return;
+        }
+        
+        const batch = firestore().batch();
+        
+        snapshot.forEach((doc: any) => {
+          console.log('Marking message as read:', doc.id);
+          batch.update(doc.ref, { read: true });
+        });
+        
+        await batch.commit();
+        console.log(`Successfully marked ${snapshot.size} messages as read`);
+      } catch (error) {
+        console.error('Error marking messages as read:', error);
+      }
+    };
+
+    // Mark messages as read when component mounts
+    markMessagesAsRead();
+  }, [user, userData.uid]);
+  
+
+
+  const renderItem = ({ item, index }: { item: Message; index: number }) => {
     const isCurrentUser = user && item.senderId === user.uid;
+    const showDateSeparator =
+      index === 0 ||
+      (index > 0 &&
+        formatDate(messages[index - 1].timestamp) !==
+          formatDate(item.timestamp));
 
     return (
-      <View
-        style={[
-          styles.messageRow,
-          isCurrentUser ? styles.rightAlign : styles.leftAlign,
-        ]}
-      >
-        {!isCurrentUser && (
-          <Image 
-            source={{ uri: userData.profile_image || 'https://via.placeholder.com/150' }} 
-            style={styles.avatar} 
-          />
+      <View>
+        {showDateSeparator && (
+          <View style={styles.dateSeparator}>
+            <Text style={styles.dateText}>{formatDate(item.timestamp)}</Text>
+          </View>
         )}
 
         <View
           style={[
-            styles.bubble,
-            isCurrentUser ? styles.rightBubble : styles.leftBubble,
+            styles.messageRow,
+            isCurrentUser ? styles.rightAlign : styles.leftAlign,
           ]}
         >
-          <Text style={styles.messageText}>
-            {item.text}
-          </Text>
-          <Text style={styles.timestamp}>
-            {item.timestamp?.toDate ? 
-              item.timestamp.toDate().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 
-              ''}
-          </Text>
-        </View>
+          {!isCurrentUser && (
+            <Image
+              source={{
+                uri:
+                  userData.profile_image || 'https://via.placeholder.com/150',
+              }}
+              style={styles.avatar}
+            />
+          )}
 
-        {isCurrentUser && <View style={{ width: 40 }} />}
+          <View
+            style={[
+              styles.bubbleContainer,
+              isCurrentUser ? styles.rightContainer : styles.leftContainer,
+            ]}
+          >
+            <View
+              style={[
+                styles.bubble,
+                isCurrentUser ? styles.rightBubble : styles.leftBubble,
+              ]}
+            >
+              <Text style={styles.messageText}>{item.text}</Text>
+            </View>
+            {/* Timestamp for both sender and receiver messages */}
+            <Text
+              style={[
+                styles.timestamp,
+                !isCurrentUser && isCurrentUser
+                  ? styles.rightTimestamp
+                  : styles.leftTimestamp,
+              ]}
+            >
+              {formatTime(item.timestamp)}
+            </Text>
+          </View>
+
+          {isCurrentUser && (
+            <Image
+              source={{
+                uri: getUserAvatar(user),
+              }}
+              style={styles.currentUserAvatar}
+            />
+          )}
+        </View>
       </View>
     );
   };
 
   return (
-    <View style={styles.container}>
+    <KeyboardAvoidingView
+      style={styles.container}
+      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+    >
       <StatusBar barStyle="dark-content" backgroundColor="#FFF" />
 
       {/* Header */}
       <View style={styles.header}>
         <TouchableOpacity onPress={() => navigation.goBack()}>
-          <Feather name="arrow-left" size={24} color="#000" />
+          <Feather name="arrow-left" size={22} color="#000" />
         </TouchableOpacity>
 
         <View style={styles.headerCenter}>
-          <Image 
-            source={{ uri: userData.profile_image || 'https://via.placeholder.com/150' }} 
-            style={styles.headerAvatar} 
+          <Image
+            source={{
+              uri: userData.profile_image || getUserAvatar({ displayName: userData.name, photoURL: userData.profile_image }),
+            }}
+            style={styles.headerAvatar}
           />
           <View>
             <Text style={styles.headerName}>{userData.name}</Text>
@@ -118,109 +284,146 @@ const UserMessage = ({ route }: Props) => {
             </Text>
           </View>
         </View>
-
-        <View style={styles.headerActions}>
-          <TouchableOpacity style={styles.actionButton}>
-            <Feather name="phone" size={20} color="#000" />
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.actionButton}>
-            <Feather name="video" size={20} color="#000" />
-          </TouchableOpacity>
-        </View>
       </View>
 
       {/* Messages */}
       <FlatList
+        ref={flatListRef}
         data={messages}
-        keyExtractor={(item, index) => item.id ? item.id : `msg-${index}`}
+        keyExtractor={(item, index) => (item.id ? item.id : `msg-${index}`)}
         renderItem={renderItem}
         showsVerticalScrollIndicator={false}
         contentContainerStyle={styles.listContent}
-        inverted // Show newest messages at bottom
       />
 
-      {/* Input Bar */}
-      <View style={styles.inputBar}>
-        <TouchableOpacity style={styles.iconButton}>
-          <Feather name="paperclip" size={20} color="#666" />
+      {/* INPUT BAR */}
+      <View style={styles.inputWrapper}>
+        <TouchableOpacity>
+          <Entypo name="attachment" size={24} color="#000" />
         </TouchableOpacity>
 
-        <View style={styles.inputContainer}>
+        <View style={{ width: '66%', top: 10, left: 3 }}>
           <AppTextInput
+            style={{
+              backgroundColor: '#f0f0f0',
+              borderRadius: 14,
+              paddingRight: 40,
+            }}
             value={inputText}
             onChangeText={setInputText}
-            placeholder="Write your message"
-            style={styles.textInput}
+            placeholder="Type a message..."
+            placeholderTextColor="#999"
+            multiline
+            onFocus={() => setIsFocused(true)}
+            onBlur={() => setIsFocused(false)}
+            label={null}
+            error={null}
           />
+          <TouchableOpacity
+            style={{
+              position: 'absolute',
+              right: 10,
+              top: 10,
+              backgroundColor: '#f0f0f0',
+             
+            }}
+          >
+            <Feather name="file" size={24} color="#666" />
+          </TouchableOpacity>
         </View>
 
-        <TouchableOpacity style={styles.iconButton}>
-          <Feather name="camera" size={20} color="#666" />
+        <TouchableOpacity style={styles.actionButton}>
+          <Feather name="camera" size={24} color="#666" />
         </TouchableOpacity>
 
-        <TouchableOpacity 
-          style={styles.sendButton} 
-          onPress={handleSendMessage}
-        >
-          <Feather name="send" size={20} color="#fff" />
-        </TouchableOpacity>
+        {inputText.trim() ? (
+          <TouchableOpacity
+            style={[
+              styles.sendButton,
+              !inputText.trim() && styles.disabledSendButton,
+            ]}
+            onPress={handleSendMessage}
+            disabled={!inputText.trim()}
+          >
+            <Feather
+              name="send"
+              size={22}
+              color={inputText.trim() ? '#fff' : '#aaa'}
+            />
+          </TouchableOpacity>
+        ) : (
+          <TouchableOpacity style={styles.actionButton}>
+            <MaterialIcons name="keyboard-voice" size={24} color="#666" />
+          </TouchableOpacity>
+        )}
       </View>
-    </View>
+    </KeyboardAvoidingView>
   );
 };
 
 export default UserMessage;
 
 const styles = StyleSheet.create({
+  actionButton: {
+
+  },
   container: {
     flex: 1,
-    backgroundColor: '#FFF',
+    backgroundColor: '#fff',
   },
 
-  /* Header */
+  /* ---------------- Header ---------------- */
   header: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 15,
-    height: 70,
-    borderBottomWidth: 0.5,
-    borderBottomColor: '#EEE',
+    paddingHorizontal: 12,
+    height: 60,
+    backgroundColor: '#FFF',
+    borderBottomWidth: 1,
+    borderBottomColor: '#eee',
   },
   headerCenter: {
-    flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
+    flex: 1,
     marginLeft: 10,
   },
   headerAvatar: {
-    width: 45,
-    height: 45,
-    borderRadius: 22,
+    width: 42,
+    height: 42,
+    borderRadius: 21,
     marginRight: 10,
   },
   headerName: {
     fontSize: 16,
     fontWeight: '600',
+    color: '#000',
   },
   headerStatus: {
     fontSize: 12,
     color: '#4CAF50',
-  },
-  headerActions: {
-    flexDirection: 'row',
-    gap: 15,
-  },
-  actionButton: {
-    padding: 5,
+    marginTop: 2,
   },
 
-  /* Messages */
+  /* ---------------- Messages ---------------- */
   listContent: {
-    padding: 15,
+    paddingBottom: 20,
+  },
+  dateSeparator: {
+    alignItems: 'center',
+    marginVertical: 15,
+  },
+  dateText: {
+    fontSize: 12,
+    color: '#666',
+    backgroundColor: 'rgba(0,0,0,0.05)',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 12,
   },
   messageRow: {
     flexDirection: 'row',
-    marginBottom: 15,
+    marginVertical: 4,
     alignItems: 'flex-end',
   },
   leftAlign: {
@@ -230,66 +433,113 @@ const styles = StyleSheet.create({
     justifyContent: 'flex-end',
   },
   avatar: {
-    width: 35,
-    height: 35,
-    borderRadius: 18,
+    width: 32,
+    height: 32,
+    borderRadius: 16,
     marginRight: 8,
+    marginBottom: 15,
+  },
+  currentUserAvatar: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    marginLeft: 8,
+    marginBottom: 15,
+  },
+  bubbleContainer: {
+    maxWidth: '75%',
+  },
+  leftContainer: {
+    alignItems: 'flex-start',
+  },
+  rightContainer: {
+    alignItems: 'flex-end',
   },
   bubble: {
-    maxWidth: '70%',
-    padding: 12,
-    borderRadius: 12,
-    position: 'relative',
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 18,
+    maxWidth: '100%',
+    minWidth: 60,
   },
   leftBubble: {
-    backgroundColor: '#EEF1F4',
-    borderTopLeftRadius: 0,
+    backgroundColor: '#FFFFFF',
+    borderBottomLeftRadius: 4,
+    elevation: 1,
   },
   rightBubble: {
-    backgroundColor: '#1DAA8E',
-    borderTopRightRadius: 0,
+    backgroundColor: '#18b3a4',
+    borderBottomRightRadius: 4,
   },
   messageText: {
-    fontSize: 14,
-    color: '#fff',
+    fontSize: 16,
+    lineHeight: 20,
+    color: '#000',
+  },
+  leftTimestamp: {
+    fontSize: 11,
+    color: '#888',
+    marginTop: 4,
+    alignSelf: 'flex-start',
+  },
+  rightTimestamp: {
+    fontSize: 11,
+    color: 'rgba(255,255,255,0.8)',
+    marginTop: 4,
+    alignSelf: 'flex-end',
   },
   timestamp: {
-    fontSize: 10,
-    color: 'rgba(255,255,255,0.7)',
-    textAlign: 'right',
+    fontSize: 11,
+    color: '#888',
     marginTop: 4,
   },
 
-  /* Input */
-  inputBar: {
+  /* ---------------- Input Bar ---------------- */
+  inputWrapper: {
+    flexDirection: 'row',
+    width: '100%',
+    backgroundColor: '#fff',
+    height: 70,
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 10,
+    borderTopWidth: 1,
+    borderColor: '#eee',
+    marginBottom: 20,
+  },
+
+  leftIcon: {
+    padding: 6,
+  },
+
+  rightIcon: {
+    padding: 6,
+  },
+
+  rightActions: {
     flexDirection: 'row',
     alignItems: 'center',
-    padding: 10,
-    borderTopWidth: 0.5,
-    borderTopColor: '#EEE',
-    gap: 10,
   },
-  iconButton: {
-    padding: 5,
-  },
-  inputContainer: {
-    flex: 1,
-    height: 40,
-    backgroundColor: '#F2F2F2',
-    borderRadius: 20,
-    justifyContent: 'center',
-    paddingHorizontal: 15,
-  },
+
   textInput: {
-    height: '100%',
-    fontSize: 14,
+    flex: 1,
+    fontSize: 15,
+    paddingVertical: 8,
+    color: '#000',
   },
+
   sendButton: {
     width: 40,
     height: 40,
     borderRadius: 20,
-    backgroundColor: '#1DAA8E',
+    backgroundColor: '#18b3a4',
     justifyContent: 'center',
     alignItems: 'center',
+    marginLeft: 6,
+    marginBottom: 2,
+  },
+
+  disabledSendButton: {
+    backgroundColor: '#f0f0f0',
   },
 });

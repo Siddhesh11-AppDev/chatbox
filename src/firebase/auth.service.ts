@@ -1,5 +1,6 @@
 import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, updateProfile, signOut } from '@react-native-firebase/auth';
 import { getFirestore, doc, setDoc, getDoc, updateDoc } from '@react-native-firebase/firestore';
+import { getDatabase, ref, set, update } from '@react-native-firebase/database'; // Added RTDB imports
 import { COLLECTIONS } from './collection';
 
 interface SignUpCredentials {
@@ -21,6 +22,8 @@ interface UserResponse {
 
 class AuthService {
     private auth = getAuth();
+    private firestore = getFirestore();
+    private database = getDatabase(); // Added RTDB instance
 
     constructor() {
         
@@ -43,13 +46,21 @@ class AuthService {
             });
 
             // Store user data in Firestore
-            const firestore = getFirestore();
-            await setDoc(doc(firestore, COLLECTIONS.USERS, user.uid), {
+            await setDoc(doc(this.firestore, COLLECTIONS.USERS, user.uid), {
                 name: credentials.name,
                 email: credentials.email,
                 createdAt: new Date(),
                 uid: user.uid,
                 online: true, // Set user as online when they register
+            });
+
+            // Also store in Realtime Database to match project memory requirement
+            await set(ref(this.database, `/users/${user.uid}`), {
+                name: credentials.name,
+                email: credentials.email,
+                createdAt: Date.now(), // RTDB uses milliseconds
+                uid: user.uid,
+                online: true,
             });
 
             return {
@@ -72,10 +83,14 @@ class AuthService {
 
             const user = userCredential.user;
 
-            // Update user status to online
-            const firestore = getFirestore();
-            await updateDoc(doc(firestore, COLLECTIONS.USERS, user.uid), {
+            // Update user status to online in both databases
+            await updateDoc(doc(this.firestore, COLLECTIONS.USERS, user.uid), {
                 online: true,
+            });
+
+            // Update RTDB as well
+            await update(ref(this.database, `/users/${user.uid}`), {
+                online: true
             });
 
             return {
@@ -90,12 +105,16 @@ class AuthService {
 
     async signOut(): Promise<void> {
         try {
-            // Update user status to offline before signing out
+            // Update user status to offline before signing out in both databases
             const user = this.getCurrentUser();
             if (user) {
-                const firestore = getFirestore();
-                await updateDoc(doc(firestore, COLLECTIONS.USERS, user.uid), {
+                await updateDoc(doc(this.firestore, COLLECTIONS.USERS, user.uid), {
                     online: false,
+                });
+
+                // Update RTDB as well
+                await update(ref(this.database, `/users/${user.uid}`), {
+                    online: false
                 });
             }
             

@@ -1,6 +1,3 @@
-
-
-
 // import { StyleSheet } from 'react-native';
 // import React from 'react';
 // import { createNativeStackNavigator } from '@react-navigation/native-stack';
@@ -50,10 +47,6 @@
 
 // const styles = StyleSheet.create({});
 
-
-
-
-
 import { StyleSheet } from 'react-native';
 import React from 'react';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
@@ -63,6 +56,7 @@ import AuthNavigator from './AuthNavigator';
 import TabNavigator from './TabNavigator';
 import { useAuth } from '../context/AuthContext';
 import UserMessage from '../screens/home/message/UserMessage';
+import UserProfile from '../screens/home/settings/UserProfile';
 
 export type AppStackParamList = {
   Splash: undefined;
@@ -70,6 +64,7 @@ export type AppStackParamList = {
   Auth: undefined;
   Tab: undefined;
   userMsg: { userData: any }; // Add this line for user message navigation
+  userProfile: undefined;
 };
 
 const Stack = createNativeStackNavigator<AppStackParamList>();
@@ -91,6 +86,7 @@ const AppNavigator = () => {
         <>
           <Stack.Screen name="Tab" component={TabNavigator} />
           <Stack.Screen name="userMsg" component={UserMessage} />
+          <Stack.Screen name="userProfile" component={UserProfile} />
         </>
       ) : (
         <>

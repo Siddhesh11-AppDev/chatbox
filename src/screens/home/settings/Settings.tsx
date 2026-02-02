@@ -12,10 +12,11 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import Feather from 'react-native-vector-icons/Feather';
 import MaterialDesignIcons from 'react-native-vector-icons/MaterialCommunityIcons';
 import AppButton from '../../../components/AppButton';
+import {launchCamera, launchImageLibrary} from 'react-native-image-picker';
 
 import { authService } from '../../../firebase/auth.service';
 import { useAuth } from '../../../context/AuthContext';
-
+import { getUserAvatar } from '../../../utils/avatarUtils';
 
 const settingsOptions = [
   {
@@ -90,20 +91,20 @@ export default function Settings() {
         {/* Profile */}
         <View style={styles.profileRow}>
           <Image
-            source={{ 
-              uri: user?.photoURL || 'https://randomuser.me/api/portraits/men/45.jpg' 
+            source={{
+              uri: getUserAvatar(user),
             }}
             style={styles.profileImage}
           />
-          <View style={{ flex: 1, marginLeft: 12 }}>
+          <TouchableOpacity style={{ flex: 1, marginLeft: 12 }} onPress={() => navigation.navigate('userProfile' as never)}>
             <Text style={styles.profileName}>
               {user?.displayName || 'User'}
             </Text>
-            <Text style={styles.profileStatus}>
-              {user?.email || 'Online'}
-            </Text>
-          </View>
-          <MaterialDesignIcons name="qrcode-scan" size={22} color="#5F9EA0" />
+            <Text style={styles.profileStatus}>Online</Text>
+          </TouchableOpacity>
+          <TouchableOpacity>
+            <MaterialDesignIcons name="qrcode-scan" size={22} color="#5F9EA0" />
+          </TouchableOpacity>
         </View>
 
         {/* Options */}
@@ -113,7 +114,14 @@ export default function Settings() {
           renderItem={renderItem}
           showsVerticalScrollIndicator={false}
         />
-        <AppButton title={'Log Out'} backgroundColor='red' textColor='white' onPress={() => { authService.signOut(); }}/>
+        <AppButton
+          title={'Log Out'}
+          backgroundColor="red"
+          textColor="white"
+          onPress={() => {
+            authService.signOut();
+          }}
+        />
       </View>
     </SafeAreaView>
   );
