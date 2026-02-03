@@ -9,6 +9,7 @@ import FontAwesome from 'react-native-vector-icons/FontAwesome';
 import AntDesign from 'react-native-vector-icons/AntDesign';
 import Ionicons from 'react-native-vector-icons/Ionicons';
 import Feather from 'react-native-vector-icons/Feather';
+import ToastExample from '../components/ToastExample';
 
 // Extend the Tab navigator to include the userMsg route
 export type AppStackParamList = {
@@ -17,6 +18,7 @@ export type AppStackParamList = {
   Contacts: undefined;
   Settings: undefined;
   userMsg: { userData: any };
+  // ToastExample: undefined;
 };
 
 const Tab = createBottomTabNavigator<AppStackParamList>();
@@ -101,6 +103,20 @@ const TabNavigator = () => {
           ),
         }}
       />
+      {/* <Tab.Screen
+        name="ToastExample"
+        component={ToastExample}
+        options={{
+          tabBarIcon: ({ focused }) => (
+            <TabIcon
+              label="Settings"
+              IconComponent={Ionicons}
+              iconName="settings-outline"
+              focused={focused}
+            />
+          ),
+        }}
+      /> */}
     </Tab.Navigator>
   );
 };

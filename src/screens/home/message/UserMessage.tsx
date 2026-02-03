@@ -21,8 +21,13 @@ import { AppStackParamList } from '../../../navigation/AppNavigator';
 import AppTextInput from '../../../components/AppTextInput';
 import { useAuth } from '../../../context/AuthContext';
 import { chatService } from '../../../firebase/chat.service';
-import firestore, { getDocs, query, where } from '@react-native-firebase/firestore';
+import firestore, {
+  getDocs,
+  query,
+  where,
+} from '@react-native-firebase/firestore';
 import { getUserAvatar } from '../../../utils/avatarUtils';
+import { launchImageLibrary, launchCamera, MediaType } from 'react-native-image-picker';
 
 type Props = NativeStackScreenProps<AppStackParamList, 'userMsg'>;
 
@@ -75,6 +80,62 @@ const UserMessage = ({ route }: Props) => {
     } catch (error) {
       Alert.alert('Error', 'Failed to send message');
     }
+  };
+
+  const handleSendImage = async (imageUri: string) => {
+    if (!user) return;
+
+    try {
+      // Send the image URI as a text message with a prefix indicating it's an image
+      await chatService.sendMessage(user.uid, userData.uid, `image:${imageUri}`);
+      setTimeout(() => {
+        flatListRef.current?.scrollToEnd({ animated: true });
+      }, 100);
+    } catch (error) {
+      Alert.alert('Error', 'Failed to send image');
+    }
+  };
+
+  const selectImageFromGallery = () => {
+    const options = {
+      mediaType: 'photo' as MediaType,
+      quality: 0.8 as const,
+      maxWidth: 1000,
+      maxHeight: 1000,
+    };
+
+    launchImageLibrary(options, (response) => {
+      if (response.didCancel || response.errorCode) {
+        console.log('Image picker cancelled or error:', response.errorMessage);
+        return;
+      }
+
+      const asset = response.assets?.[0];
+      if (asset && asset.uri) {
+        handleSendImage(asset.uri);
+      }
+    });
+  };
+
+  
+
+  const showImageOptions = () => {
+    Alert.alert(
+      'Send Image',
+      'How would you like to add an image?',
+      [
+        {
+          text: 'Gallery',
+          onPress: selectImageFromGallery,
+        },
+       
+        {
+          text: 'Cancel',
+          style: 'cancel',
+        },
+      ],
+      { cancelable: true }
+    );
   };
 
   const formatTime = (timestamp: any) => {
@@ -132,46 +193,44 @@ const UserMessage = ({ route }: Props) => {
     }
   };
 
-
-
   // Mark messages as read when user opens the chat
   useEffect(() => {
     if (!user) return;
 
     const chatId = chatService.getChatId(user.uid, userData.uid);
-    
+
     const markMessagesAsRead = async () => {
       try {
         console.log('Attempting to mark messages as read for chat:', chatId);
         console.log('Current user ID:', user.uid);
         console.log('Chat partner ID:', userData.uid);
-        
+
         const messagesRef = firestore()
           .collection('chats')
           .doc(chatId)
           .collection('messages');
-        
+
         const q = query(
           messagesRef,
           where('receiverId', '==', user.uid), // Messages sent to current user
-          where('read', '==', false) // That are unread
+          where('read', '==', false), // That are unread
         );
-        
+
         const snapshot = await getDocs(q);
         console.log(`Found ${snapshot.size} unread messages to mark as read`);
-        
+
         if (snapshot.empty) {
           console.log('No unread messages found');
           return;
         }
-        
+
         const batch = firestore().batch();
-        
+
         snapshot.forEach((doc: any) => {
           console.log('Marking message as read:', doc.id);
           batch.update(doc.ref, { read: true });
         });
-        
+
         await batch.commit();
         console.log(`Successfully marked ${snapshot.size} messages as read`);
       } catch (error) {
@@ -182,8 +241,6 @@ const UserMessage = ({ route }: Props) => {
     // Mark messages as read when component mounts
     markMessagesAsRead();
   }, [user, userData.uid]);
-  
-
 
   const renderItem = ({ item, index }: { item: Message; index: number }) => {
     const isCurrentUser = user && item.senderId === user.uid;
@@ -192,6 +249,10 @@ const UserMessage = ({ route }: Props) => {
       (index > 0 &&
         formatDate(messages[index - 1].timestamp) !==
           formatDate(item.timestamp));
+
+    // Check if message is an image (starts with 'image:' prefix)
+    const isImageMessage = item.text.startsWith('image:');
+    const messageText = isImageMessage ? item.text.substring(6) : item.text; // Remove 'image:' prefix
 
     return (
       <View>
@@ -208,13 +269,9 @@ const UserMessage = ({ route }: Props) => {
           ]}
         >
           {!isCurrentUser && (
-            <Image
-              source={{
-                uri:
-                  userData.profile_image || 'https://via.placeholder.com/150',
-              }}
-              style={styles.avatar}
-            />
+            <View style={styles.headerAvatarUser}>
+            <Text style={styles.headerAvatarTextUser}>{userData.name[0]}</Text>
+          </View>
           )}
 
           <View
@@ -229,7 +286,16 @@ const UserMessage = ({ route }: Props) => {
                 isCurrentUser ? styles.rightBubble : styles.leftBubble,
               ]}
             >
-              <Text style={styles.messageText}>{item.text}</Text>
+              {isImageMessage ? (
+                <Image
+                  source={{ uri: messageText }}
+                  style={styles.imageMessage}
+                  onError={(error) => console.log('Image load error:', error)}
+                  onLoad={(success) => console.log('Image loaded successfully')}
+                />
+              ) : (
+                <Text style={styles.messageText}>{item.text}</Text>
+              )}
             </View>
             {/* Timestamp for both sender and receiver messages */}
             <Text
@@ -245,12 +311,9 @@ const UserMessage = ({ route }: Props) => {
           </View>
 
           {isCurrentUser && (
-            <Image
-              source={{
-                uri: getUserAvatar(user),
-              }}
-              style={styles.currentUserAvatar}
-            />
+            <View style={styles.headerAvatarUser}>
+            <Text style={styles.headerAvatarTextUser}>{user?.displayName?.charAt(0)}</Text>
+          </View>
           )}
         </View>
       </View>
@@ -271,17 +334,24 @@ const UserMessage = ({ route }: Props) => {
         </TouchableOpacity>
 
         <View style={styles.headerCenter}>
-          <Image
-            source={{
-              uri: userData.profile_image || getUserAvatar({ displayName: userData.name, photoURL: userData.profile_image }),
-            }}
-            style={styles.headerAvatar}
-          />
+          <View style={styles.headerAvatar}>
+            <Text style={styles.headerAvatarText}>{userData.name[0]}</Text>
+          </View>
+
           <View>
             <Text style={styles.headerName}>{userData.name}</Text>
             <Text style={styles.headerStatus}>
               {userData.online ? 'Online' : 'Offline'}
             </Text>
+          </View>
+
+          <View style={{ flexDirection: 'row', alignItems: 'center', flex: 1 ,gap:30, left:"40%"}}>
+            <TouchableOpacity>
+              <Feather name="phone" size={24} color="#000" />
+            </TouchableOpacity>
+            <TouchableOpacity>
+              <Feather name="video" size={24} color="#000" />
+            </TouchableOpacity>
           </View>
         </View>
       </View>
@@ -298,7 +368,7 @@ const UserMessage = ({ route }: Props) => {
 
       {/* INPUT BAR */}
       <View style={styles.inputWrapper}>
-        <TouchableOpacity>
+        <TouchableOpacity onPress={showImageOptions}>
           <Entypo name="attachment" size={24} color="#000" />
         </TouchableOpacity>
 
@@ -325,7 +395,6 @@ const UserMessage = ({ route }: Props) => {
               right: 10,
               top: 10,
               backgroundColor: '#f0f0f0',
-             
             }}
           >
             <Feather name="file" size={24} color="#666" />
@@ -364,9 +433,7 @@ const UserMessage = ({ route }: Props) => {
 export default UserMessage;
 
 const styles = StyleSheet.create({
-  actionButton: {
-
-  },
+  actionButton: {},
   container: {
     flex: 1,
     backgroundColor: '#fff',
@@ -386,13 +453,36 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     flex: 1,
-    marginLeft: 10,
+    marginLeft: 10, 
+   
   },
   headerAvatar: {
-    width: 42,
-    height: 42,
+    width: 40,
+    height: 40,
     borderRadius: 21,
     marginRight: 10,
+    backgroundColor: '#000',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  headerAvatarUser: {
+    width: 30,
+    height: 30,
+    borderRadius: 20,
+    marginRight: 10,
+    backgroundColor: '#000',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  headerAvatarText: {
+    fontSize: 26,
+    color: '#fff',
+    textAlign: 'center',
+  },
+  headerAvatarTextUser: {
+    fontSize: 20,
+    color: '#fff',
+    textAlign: 'center',
   },
   headerName: {
     fontSize: 16,
@@ -428,6 +518,7 @@ const styles = StyleSheet.create({
   },
   leftAlign: {
     justifyContent: 'flex-start',
+    marginLeft: 10,
   },
   rightAlign: {
     justifyContent: 'flex-end',
@@ -541,5 +632,11 @@ const styles = StyleSheet.create({
 
   disabledSendButton: {
     backgroundColor: '#f0f0f0',
+  },
+  
+  imageMessage: {
+    width: 200,
+    height: 200,
+    borderRadius: 8,
   },
 });

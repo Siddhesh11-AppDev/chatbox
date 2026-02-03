@@ -5,6 +5,7 @@ import {
   StatusBar,
   StyleSheet,
   Text,
+  TextInput,
   TouchableOpacity,
   View,
 } from 'react-native';
@@ -49,12 +50,54 @@ interface User {
 
 const Messages = () => {
   const scrollY = useRef(new Animated.Value(0)).current;
+  const searchWidth = useRef(new Animated.Value(40)).current; // Start with small width (icon size)
+  const searchOpacity = useRef(new Animated.Value(0)).current; // Start hidden
   const navigation = useNavigation<MessagesNavigationProp>();
   const { user } = useAuth();
   const [users, setUsers] = useState<User[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
-  const [unreadCounts, setUnreadCounts] = useState<{[key: string]: number}>({});
-  const [lastMessages, setLastMessages] = useState<{[key: string]: string}>({});
+  const [isSearchActive, setIsSearchActive] = useState(false); // Track search state
+  const [unreadCounts, setUnreadCounts] = useState<{ [key: string]: number }>(
+    {},
+  );
+  const [lastMessages, setLastMessages] = useState<{ [key: string]: string }>(
+    {},
+  );
+
+  // Toggle search bar animation
+  const toggleSearchBar = () => {
+    if (isSearchActive) {
+      // Close search bar
+      Animated.parallel([
+        Animated.timing(searchWidth, {
+          toValue: 40, // Back to icon size
+          duration: 200,
+          useNativeDriver: false,
+        }),
+        Animated.timing(searchOpacity, {
+          toValue: 0, // Fade out
+          duration: 150,
+          useNativeDriver: false,
+        }),
+      ]).start();
+    } else {
+      // Open search bar
+      Animated.parallel([
+        Animated.timing(searchWidth, {
+          toValue: 350, // Expand to desired width
+          duration: 250,
+          useNativeDriver: false,
+        }),
+        Animated.timing(searchOpacity, {
+          toValue: 1, // Fade in
+          duration: 200,
+          delay: 50, // Slight delay to show width expansion first
+          useNativeDriver: false,
+        }),
+      ]).start();
+    }
+    setIsSearchActive(!isSearchActive);
+  };
 
   useEffect(() => {
     if (!user) return;
@@ -67,7 +110,11 @@ const Messages = () => {
       name: userData.name || '',
       email: userData.email || '',
       profile_image:
-        userData.profile_image || getUserAvatar({ displayName: userData.name, photoURL: userData.profile_image }),
+        userData.profile_image ||
+        getUserAvatar({
+          displayName: userData.name,
+          photoURL: userData.profile_image,
+        }),
       online: !!userData.online,
       last_message:
         typeof userData.last_message === 'string' ? userData.last_message : '',
@@ -113,20 +160,20 @@ const Messages = () => {
       const chatId = chatService.getChatId(user.uid, u.uid);
       const messagesRef = collection(
         getFirestore(),
-        `chats/${chatId}/messages`
+        `chats/${chatId}/messages`,
       );
 
       const q = query(
         messagesRef,
         where('receiverId', '==', user.uid), // Messages sent to current user
-        where('read', '==', false) // Only unread messages
+        where('read', '==', false), // Only unread messages
       );
 
-      const unsubscribe = onSnapshot(q, (snapshot) => {
+      const unsubscribe = onSnapshot(q, snapshot => {
         const count = snapshot?.size || 0; // Safely access the size property
         setUnreadCounts(prev => ({
           ...prev,
-          [u.uid]: count
+          [u.uid]: count,
         }));
       });
 
@@ -149,28 +196,24 @@ const Messages = () => {
       const chatId = chatService.getChatId(user.uid, u.uid);
       const messagesRef = collection(
         getFirestore(),
-        `chats/${chatId}/messages`
+        `chats/${chatId}/messages`,
       );
 
-      const q = query(
-        messagesRef,
-        orderBy('timestamp', 'desc'),
-        limit(1)
-      );
+      const q = query(messagesRef, orderBy('timestamp', 'desc'), limit(1));
 
-      const unsubscribe = onSnapshot(q, (snapshot) => {
+      const unsubscribe = onSnapshot(q, snapshot => {
         if (!snapshot.empty) {
           const lastMessageDoc = snapshot.docs[0];
           const messageData = lastMessageDoc.data();
           setLastMessages(prev => ({
             ...prev,
-            [u.uid]: messageData.text || ''
+            [u.uid]: messageData.text || '',
           }));
         } else {
           // If no messages in the chat, set empty string
           setLastMessages(prev => ({
             ...prev,
-            [u.uid]: ''
+            [u.uid]: '',
           }));
         }
       });
@@ -227,15 +270,53 @@ const Messages = () => {
     <>
       {/* Header */}
       <View style={styles.fixedHeader}>
-        <TouchableOpacity style={styles.searchIcon}>
-          <Feather name="search" size={22} color="#FFF" />
-        </TouchableOpacity>
+        <Animated.View
+          style={[styles.animatedSearchContainer, { width: searchWidth }]}
+        >
+          <TouchableOpacity style={styles.searchIcon} onPress={toggleSearchBar}>
+            <Animated.View style={{ opacity: isSearchActive ? 0 : 1 }}>
+              <Feather name="search" size={22} color="#000" />
+            </Animated.View>
+          </TouchableOpacity>
 
-        <Text style={styles.headerTitle}>Home</Text>
+          <Animated.View style={{ opacity: searchOpacity, flex: 1 }}>
+            <View style={styles.searchBarContainer}>
+              <Feather
+                name="search"
+                size={20}
+                color="#000"
+                style={styles.searchIconInBar}
+              />
+              <TextInput
+                placeholder="Search users..."
+                placeholderTextColor="#999"
+                style={styles.searchInput}
+                value={searchQuery}
+                onChangeText={setSearchQuery}
+                autoFocus={isSearchActive}
+                onFocus={() => setIsSearchActive(true)}
+              />
+              <TouchableOpacity
+                onPress={() => {
+                  setSearchQuery('');
+                  if (isSearchActive) toggleSearchBar();
+                }}
+              >
+                <Feather name="x" size={20} color="#999" />
+              </TouchableOpacity>
+            </View>
+          </Animated.View>
+        </Animated.View>
 
-        <TouchableOpacity onPress={() => navigation.navigate('Settings')}>
-          <FontAwesome name="user-circle" size={34} color="#FFF" />
-        </TouchableOpacity>
+        {!isSearchActive && (
+          <>
+            <Text style={styles.headerTitle}>Home</Text>
+
+            <TouchableOpacity onPress={() => navigation.navigate('Settings')}>
+              <FontAwesome name="user-circle" size={34} color="#FFF" />
+            </TouchableOpacity>
+          </>
+        )}
       </View>
 
       {/* Stories - Now showing users with unread messages */}
@@ -249,7 +330,14 @@ const Messages = () => {
             <View style={styles.storyItem}>
               <View style={styles.storyRing}>
                 <Image
-                  source={{ uri: item.profile_image || getUserAvatar({ displayName: item.name, photoURL: item.profile_image }) }}
+                  source={{
+                    uri:
+                      item.profile_image ||
+                      getUserAvatar({
+                        displayName: item.name,
+                        photoURL: item.profile_image,
+                      }),
+                  }}
                   style={styles.storyImage}
                 />
               </View>
@@ -286,17 +374,17 @@ const Messages = () => {
               onPress={() => handleMessagePress(item)}
             >
               <View style={styles.avatarContainer}>
-                <Image
-                  source={{ uri: item.profile_image || getUserAvatar({ displayName: item.name, photoURL: item.profile_image }) }}
-                  style={styles.avatar}
-                />
+                <View style={styles.avatar}>
+                  <Text style={styles.avatarText}>{item.name?.charAt(0)}</Text>
+                </View>
+
                 {item.online && <View style={styles.greenDot} />}
               </View>
 
               <View style={styles.messageContent}>
                 <Text style={styles.contactName}>{item.name}</Text>
                 <Text style={styles.lastMessage} numberOfLines={1}>
-                  {getLastMessage(item.uid) || 'Tap to start chatting'}
+                  {getLastMessage(item.uid)?.startsWith('image:') ? 'IMG' : getLastMessage(item.uid) || 'Tap to start chatting'}
                 </Text>
               </View>
 
@@ -309,12 +397,24 @@ const Messages = () => {
               {getUnreadCount(item.uid) > 0 && (
                 <View style={styles.unreadBadge}>
                   <Text style={styles.unreadCount}>
-                    {getUnreadCount(item.uid) > 9 ? '9+' : getUnreadCount(item.uid)}
+                    {getUnreadCount(item.uid) > 9
+                      ? '9+'
+                      : getUnreadCount(item.uid)}
                   </Text>
                 </View>
               )}
             </TouchableOpacity>
           </Swipeable>
+        )}
+        ListEmptyComponent={() => (
+          // Render empty state when no users are found
+          <View style={styles.emptyListContainer}>
+            <View style={styles.emptyUserIcon}>
+              <Feather name="user" size={60} color="#9E9E9E" />
+            </View>
+            <Text style={styles.emptyTitle}>User Not Available</Text>
+            <Text style={styles.emptySubtitle}>Find User By Search</Text>
+          </View>
         )}
       />
     </View>
@@ -326,6 +426,32 @@ export default Messages;
 // ... rest of the styles remain the same
 
 const styles = StyleSheet.create({
+  animatedSearchContainer: {
+    height: 40,
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'white',
+    borderRadius: 20,
+    paddingHorizontal: 10,
+    overflow: 'hidden',
+    marginRight: 10,
+  },
+  searchBarContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+    paddingHorizontal: 10,
+  },
+  searchInput: {
+    flex: 1,
+    marginLeft: 10,
+    marginRight: 10,
+    color: '#000',
+    fontSize: 16,
+  },
+  searchIconInBar: {
+    marginLeft: 5,
+  },
   fixedHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -338,10 +464,10 @@ const styles = StyleSheet.create({
     height: 40,
     width: 40,
     borderRadius: 20,
-    borderWidth: 1,
-    borderColor: '#FFF',
+
     justifyContent: 'center',
     alignItems: 'center',
+    left: -10,
   },
   headerTitle: {
     color: '#FFF',
@@ -400,11 +526,19 @@ const styles = StyleSheet.create({
   },
   avatarContainer: {
     marginRight: 15,
+    backgroundColor: '#000',
+    borderRadius: 25,
   },
   avatar: {
     width: 50,
     height: 50,
-    borderRadius: 25,
+
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  avatarText:{
+    fontSize: 26,
+    color: '#FFF',
   },
   greenDot: {
     position: 'absolute',
@@ -477,5 +611,33 @@ const styles = StyleSheet.create({
     color: '#FFF',
     fontSize: 10,
     fontWeight: 'bold',
+  },
+  emptyListContainer: {
+    flex: 1,
+    backgroundColor: '#FFF',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 40,
+  },
+  emptyUserIcon: {
+    width: 100,
+    height: 100,
+    borderRadius: 50,
+    backgroundColor: '#F5F5F5',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 20,
+  },
+  emptyTitle: {
+    fontSize: 18,
+    fontWeight: '600',
+    color: '#333',
+    marginBottom: 8,
+    textAlign: 'center',
+  },
+  emptySubtitle: {
+    fontSize: 14,
+    color: '#777',
+    textAlign: 'center',
   },
 });

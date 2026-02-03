@@ -194,16 +194,11 @@ const UserProfile = () => {
           <Feather name="arrow-left" size={22} color="#fff" />
         </TouchableOpacity>
 
-        <TouchableOpacity onPress={showImagePickerOptions} disabled={uploading}>
-          <Image
-            source={{ uri: profileImage }}
-            style={styles.avatar}
-          />
-          {uploading && (
-            <View style={styles.uploadingOverlay}>
-              <MaterialIcons name="hourglass-empty" size={24} color="#fff" />
-            </View>
-          )}
+        <TouchableOpacity>
+          <View   style={styles.avatar}>
+            <Text style={styles.profileImageText}>{user?.displayName?.charAt(0)}</Text>
+          </View>
+          
         </TouchableOpacity>
 
         <Text style={styles.name}>{user?.displayName}</Text>
@@ -297,8 +292,14 @@ const styles = StyleSheet.create({
     height: 90,
     borderRadius: 45,
     marginBottom: 12,
+    justifyContent:"center",
+    alignItems: 'center',
   },
-
+  profileImageText:{
+    fontSize: 60,
+    fontWeight: 'bold',
+    color: '#fff',
+  },
   uploadingOverlay: {
     position: 'absolute',
     top: 0,

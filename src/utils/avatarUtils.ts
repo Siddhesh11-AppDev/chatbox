@@ -80,6 +80,8 @@ export const generateAvatarSvg = (name: string | null | undefined, size: number 
               base64Chars.charAt(enc3) + base64Chars.charAt(enc4);
   }
   
+
+  
   return `data:image/svg+xml;base64,${result}`;
 };
 

@@ -2065,6 +2065,11 @@
   dependencies:
     react-native-url-polyfill "3.0.0"
 
+"@react-native-firebase/storage@^23.8.5":
+  version "23.8.5"
+  resolved "https://registry.yarnpkg.com/@react-native-firebase/storage/-/storage-23.8.5.tgz#bf52096f3312c4abc7d9616dc703dfbea1dbb147"
+  integrity sha512-OOscVxp/G3LhHUjjU9DuGCXhIlT8PaPU2kkssckNsrSPR4JuI0OCHP+VUS9+4LBLsVdGs4SMqG/68YXpL3B2WQ==
+
 "@react-native-google-signin/google-signin@^16.1.1":
   version "16.1.1"
   resolved "https://registry.yarnpkg.com/@react-native-google-signin/google-signin/-/google-signin-16.1.1.tgz#40b9f8458a09cf8933132efd8a68f0a573167e92"
@@ -6152,6 +6157,11 @@ react-native-screens@^4.20.0:
     react-freeze "^1.0.0"
     warn-once "^0.1.0"
 
+react-native-toast-message@^2.3.3:
+  version "2.3.3"
+  resolved "https://registry.yarnpkg.com/react-native-toast-message/-/react-native-toast-message-2.3.3.tgz#e301508d386a9902ff6b4559ecc6674f8cfdf97a"
+  integrity sha512-4IIUHwUPvKHu4gjD0Vj2aGQzqPATiblL1ey8tOqsxOWRPGGu52iIbL8M/mCz4uyqecvPdIcMY38AfwRuUADfQQ==
+
 react-native-url-polyfill@3.0.0:
   version "3.0.0"
   resolved "https://registry.yarnpkg.com/react-native-url-polyfill/-/react-native-url-polyfill-3.0.0.tgz#16b809c35d45f7d4cf968967bc35ab73b7542826"
@@ -6184,7 +6194,7 @@ react-native-worklets@^0.7.2:
     convert-source-map "2.0.0"
     semver "7.7.3"
 
-react-native@0.83.1:
+react-native@^0.83.1:
   version "0.83.1"
   resolved "https://registry.yarnpkg.com/react-native/-/react-native-0.83.1.tgz#2c163cd055baa40166553487bada1eb7b9de154f"
   integrity sha512-mL1q5HPq5cWseVhWRLl+Fwvi5z1UO+3vGOpjr+sHFwcUletPRZ5Kv+d0tUfqHmvi73/53NjlQqX1Pyn4GguUfA==

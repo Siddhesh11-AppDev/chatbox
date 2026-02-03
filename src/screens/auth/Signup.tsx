@@ -4,7 +4,6 @@ import {
   Text,
   TouchableOpacity,
   View,
-  Alert,
   KeyboardAvoidingView,
   Platform,
   ScrollView,
@@ -15,6 +14,7 @@ import Icon from 'react-native-vector-icons/Feather';
 import AppTextInput from '../../components/AppTextInput';
 import AppButton from '../../components/AppButton';
 import { authService } from '../../firebase/auth.service';
+import { ToastHelper } from '../../utils/ToastHelper';
 
 const Signup = () => {
   const navigation = useNavigation();
@@ -130,14 +130,25 @@ const Signup = () => {
         password: formData.password,
       });
 
+      ToastHelper.showSignupSuccess();
+
       // Navigate directly to Signin page after successful signup
       navigation.navigate('Signin' as never);
     } catch (error: any) {
       console.error('Signup Error:', error);
-      Alert.alert(
-        'Error',
-        error.message || 'An error occurred during signup. Please try again.'
-      );
+      
+      // Show appropriate error message based on error code
+      if (error.code === 'auth/email-already-in-use') {
+        ToastHelper.showEmailExistsError();
+      } else if (error.code === 'auth/invalid-email') {
+        ToastHelper.error('Invalid Email', 'Please enter a valid email address.');
+      } else if (error.code === 'auth/weak-password') {
+        ToastHelper.showWeakPasswordError();
+      } else if (error.code === 'auth/operation-not-allowed') {
+        ToastHelper.error('Operation Not Allowed', 'Email/password accounts are not enabled.');
+      } else {
+        ToastHelper.error('Signup Failed', error.message || 'An error occurred during signup. Please try again.');
+      }
     } finally {
       setLoading(false);
     }
@@ -194,35 +205,32 @@ const Signup = () => {
               <Text style={{ color: '#24786D', fontWeight: 500 }}>Your Name</Text>
               <AppTextInput
                 value={formData.name}
-                onChangeText={(text) => handleInputChange('name', text)}
+                onChangeText={(text: string) => handleInputChange('name', text)}
                 placeholder="Enter your name"
                 error={errors.name}
-                inputMode="text"
+                style={styles.inputStyle}
                 autoCapitalize="words"
-                autoComplete="name"
               />
               
               <Text style={{ color: '#24786D', fontWeight: 500 }}>Your Email</Text>
               <AppTextInput
                 value={formData.email}
-                onChangeText={(text) => handleInputChange('email', text)}
+                onChangeText={(text: string) => handleInputChange('email', text)}
                 placeholder="Enter your email"
                 keyboardType="email-address"
                 autoCapitalize="none"
                 error={errors.email}
-                inputMode="email"
-                autoComplete="email"
+                style={styles.inputStyle}
               />
               
               <Text style={{ color: '#24786D', fontWeight: 500 }}>Password</Text>
               <AppTextInput
                 value={formData.password}
-                onChangeText={(text) => handleInputChange('password', text)}
+                onChangeText={(text: string) => handleInputChange('password', text)}
                 placeholder="Enter your password"
                 secureTextEntry
                 error={errors.password}
-                inputMode="text"
-                autoComplete="new-password"
+                style={styles.inputStyle}
               />
               
               <Text style={{ color: '#24786D', fontWeight: 500 }}>
@@ -230,21 +238,21 @@ const Signup = () => {
               </Text>
               <AppTextInput
                 value={formData.confirmPassword}
-                onChangeText={(text) => handleInputChange('confirmPassword', text)}
+                onChangeText={(text: string) => handleInputChange('confirmPassword', text)}
                 placeholder="Confirm your password"
                 secureTextEntry
                 error={errors.confirmPassword}
-                inputMode="text"
-                autoComplete="new-password"
+                style={styles.inputStyle}
               />
             </View>
 
             <AppButton
               title={loading ? "Creating Account..." : "Create an account"}
               onPress={handleSignup}
-              backgroundColor="#24786D"
+              backgroundColor={loading ? '#9E9E9E' : '#24786D'}
               textColor="#FFF"
-              disabled={loading}
+              style={styles.buttonStyle}
+              textStyle={styles.buttonText}
             />
 
             <TouchableOpacity
@@ -268,4 +276,8 @@ const Signup = () => {
 
 export default Signup;
 
-const styles = StyleSheet.create({});
+const styles = StyleSheet.create({
+  inputStyle: {},
+  buttonStyle: {},
+  buttonText: {},
+});

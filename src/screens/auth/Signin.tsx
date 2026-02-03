@@ -5,7 +5,6 @@ import {
   Text,
   TouchableOpacity,
   View,
-  Alert,
   KeyboardAvoidingView,
   Platform,
   ScrollView,
@@ -17,6 +16,7 @@ import AppTextInput from '../../components/AppTextInput';
 import AppButton from '../../components/AppButton';
 import { Images } from '../../assets/images';
 import { authService } from '../../firebase/auth.service';
+import { ToastHelper } from '../../utils/ToastHelper';
 
 const Signin = () => {
   const navigation = useNavigation();
@@ -100,14 +100,26 @@ const Signin = () => {
         password: formData.password,
       });
 
+      ToastHelper.showSigninSuccess();
       // Navigation is handled automatically by the AuthContext
       // The user will be redirected to TabNavigator
     } catch (error: any) {
       console.error('Login Error:', error);
-      Alert.alert(
-        'Error',
-        error.message || 'An error occurred during login. Please try again.',
-      );
+      
+      // Show appropriate error message based on error code
+      if (error.code === 'auth/user-not-found') {
+        ToastHelper.showInvalidCredentialsError();
+      } else if (error.code === 'auth/wrong-password') {
+        ToastHelper.showInvalidCredentialsError();
+      } else if (error.code === 'auth/invalid-email') {
+        ToastHelper.error('Invalid Email', 'Please enter a valid email address.');
+      } else if (error.code === 'auth/user-disabled') {
+        ToastHelper.error('Account Disabled', 'This account has been disabled.');
+      } else if (error.code === 'auth/too-many-requests') {
+        ToastHelper.error('Too Many Attempts', 'Too many failed attempts. Please try again later.');
+      } else {
+        ToastHelper.showAuthError();
+      }
     } finally {
       setLoading(false);
     }
@@ -181,25 +193,23 @@ const Signin = () => {
               </Text>
               <AppTextInput
                 value={formData.email}
-                onChangeText={text => handleInputChange('email', text)}
+                onChangeText={(text: string) => handleInputChange('email', text)}
                 placeholder="Enter your email"
                 keyboardType="email-address"
                 autoCapitalize="none"
                 error={errors.email}
-                inputMode="email"
-                autoComplete="email"
+                style={styles.inputStyle}
               />
               <Text style={{ color: '#24786D', fontWeight: 500 }}>
                 Password
               </Text>
               <AppTextInput
                 value={formData.password}
-                onChangeText={text => handleInputChange('password', text)}
+                onChangeText={(text: string) => handleInputChange('password', text)}
                 placeholder="Enter your password"
                 secureTextEntry
                 error={errors.password}
-                inputMode="text"
-                autoComplete="password"
+                style={styles.inputStyle}
               />
             </View>
 
@@ -207,9 +217,10 @@ const Signin = () => {
               <AppButton
                 title={loading ? 'Logging In...' : 'Log in'}
                 onPress={handleLogin}
-                backgroundColor="#24786D"
+                backgroundColor={loading ? '#9E9E9E' : '#24786D'}
                 textColor="#FFF"
-                disabled={loading}
+                style={styles.buttonStyle}
+                textStyle={styles.buttonText}
               />
               <TouchableOpacity
                 style={{
@@ -266,4 +277,7 @@ const styles = StyleSheet.create({
     height: 24,
     resizeMode: 'contain',
   },
+  inputStyle: {},
+  buttonStyle: {},
+  buttonText: {},
 });

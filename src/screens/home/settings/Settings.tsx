@@ -12,11 +12,12 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import Feather from 'react-native-vector-icons/Feather';
 import MaterialDesignIcons from 'react-native-vector-icons/MaterialCommunityIcons';
 import AppButton from '../../../components/AppButton';
-import {launchCamera, launchImageLibrary} from 'react-native-image-picker';
+import { launchCamera, launchImageLibrary } from 'react-native-image-picker';
 
 import { authService } from '../../../firebase/auth.service';
 import { useAuth } from '../../../context/AuthContext';
 import { getUserAvatar } from '../../../utils/avatarUtils';
+import ToastHelper from '../../../utils/ToastHelper';
 
 const settingsOptions = [
   {
@@ -61,6 +62,13 @@ export default function Settings() {
   const navigation = useNavigation();
   const { user } = useAuth();
 
+  const handleSignOut = () => {
+    authService.signOut();
+    setTimeout(() => {
+      ToastHelper.showLogoutSuccess();
+    }, 2000);
+  };
+
   const renderItem = ({ item }) => (
     <TouchableOpacity style={styles.row} activeOpacity={0.7}>
       <View style={styles.iconWrapper}>
@@ -90,13 +98,16 @@ export default function Settings() {
       <View style={styles.sheet}>
         {/* Profile */}
         <View style={styles.profileRow}>
-          <Image
-            source={{
-              uri: getUserAvatar(user),
-            }}
-            style={styles.profileImage}
-          />
-          <TouchableOpacity style={{ flex: 1, marginLeft: 12 }} onPress={() => navigation.navigate('userProfile' as never)}>
+          <View style={styles.profileImage}>
+            <Text style={styles.profileImageText}>
+              {user?.displayName?.charAt(0)}
+            </Text>
+          </View>
+
+          <TouchableOpacity
+            style={{ flex: 1, marginLeft: 12 }}
+            onPress={() => navigation.navigate('userProfile' as never)}
+          >
             <Text style={styles.profileName}>
               {user?.displayName || 'User'}
             </Text>
@@ -119,7 +130,7 @@ export default function Settings() {
           backgroundColor="red"
           textColor="white"
           onPress={() => {
-            authService.signOut();
+            handleSignOut();
           }}
         />
       </View>
@@ -163,6 +174,14 @@ const styles = StyleSheet.create({
     width: 56,
     height: 56,
     borderRadius: 28,
+    backgroundColor: '#000',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  profileImageText: {
+    fontSize: 40,
+    fontWeight: 'bold',
+    color: '#fff',
   },
   profileName: {
     fontSize: 17,
