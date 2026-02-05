@@ -7,8 +7,8 @@ import {
   View,
 } from 'react-native';
 import React from 'react';
-import { Images } from '../assets/images';
-import AppButton from '../components/AppButton';
+import { Images } from '../../shared/assets/images';
+import AppButton from '../../shared/components/AppButton';
 import { useNavigation } from '@react-navigation/native';
 
 const OnBoarding = () => {

@@ -12,11 +12,11 @@ import {
 import React, { useState } from 'react';
 import { useNavigation } from '@react-navigation/native';
 import Icon from 'react-native-vector-icons/Feather';
-import AppTextInput from '../../components/AppTextInput';
-import AppButton from '../../components/AppButton';
-import { Images } from '../../assets/images';
-import { authService } from '../../firebase/auth.service';
-import { ToastHelper } from '../../utils/ToastHelper';
+import AppTextInput from '../../shared/components/AppTextInput';
+import AppButton from '../../shared/components/AppButton';
+import { Images } from '../../shared/assets/images';
+import { authService } from '../../core/services/auth.service';
+import { ToastHelper } from '../../shared/utils/ToastHelper';
 
 const Signin = () => {
   const navigation = useNavigation();

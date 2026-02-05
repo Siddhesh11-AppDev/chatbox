@@ -8,7 +8,7 @@ import {
   TouchableOpacity,
 } from 'react-native';
 import Feather from 'react-native-vector-icons/Feather';
-import { CallsJson } from '../../../api/CallsJson';
+import { CallsJson } from '../../core/services/CallsJson';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 

@@ -1,14 +1,13 @@
 import { StyleSheet, Text, View } from 'react-native';
 import React from 'react';
-import SplashScreen from './src/screens/SplashScreen';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { NavigationContainer } from '@react-navigation/native';
-import AppNavigator from './src/navigation/AppNavigator';
+import AppNavigator from './src/core/navigation/AppNavigator';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
-import { AuthProvider } from './src/context/AuthContext';
+import { AuthProvider } from './src/core/context/AuthContext';
 import Toast from 'react-native-toast-message';
-import CustomToast from './src/components/CustomToast';
+import CustomToast from './src/shared/components/CustomToast';
 
 
 // Define the root stack parameter list

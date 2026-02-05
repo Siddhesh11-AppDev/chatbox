@@ -17,17 +17,21 @@ import Entypo from 'react-native-vector-icons/Entypo';
 import MaterialIcons from 'react-native-vector-icons/MaterialIcons';
 import { useNavigation } from '@react-navigation/native';
 import { NativeStackScreenProps } from '@react-navigation/native-stack';
-import { AppStackParamList } from '../../../navigation/AppNavigator';
-import AppTextInput from '../../../components/AppTextInput';
-import { useAuth } from '../../../context/AuthContext';
-import { chatService } from '../../../firebase/chat.service';
+import { AppStackParamList } from '../../core/navigation/AppNavigator';
+import AppTextInput from '../../shared/components/AppTextInput';
+import { useAuth } from '../../core/context/AuthContext';
+import { chatService } from '../../core/services/chat.service';
 import firestore, {
   getDocs,
   query,
   where,
 } from '@react-native-firebase/firestore';
-import { getUserAvatar } from '../../../utils/avatarUtils';
-import { launchImageLibrary, launchCamera, MediaType } from 'react-native-image-picker';
+import { getUserAvatar } from '../../shared/utils/avatarUtils';
+import {
+  launchImageLibrary,
+  launchCamera,
+  MediaType,
+} from 'react-native-image-picker';
 
 type Props = NativeStackScreenProps<AppStackParamList, 'userMsg'>;
 
@@ -87,7 +91,11 @@ const UserMessage = ({ route }: Props) => {
 
     try {
       // Send the image URI as a text message with a prefix indicating it's an image
-      await chatService.sendMessage(user.uid, userData.uid, `image:${imageUri}`);
+      await chatService.sendMessage(
+        user.uid,
+        userData.uid,
+        `image:${imageUri}`,
+      );
       setTimeout(() => {
         flatListRef.current?.scrollToEnd({ animated: true });
       }, 100);
@@ -104,7 +112,7 @@ const UserMessage = ({ route }: Props) => {
       maxHeight: 1000,
     };
 
-    launchImageLibrary(options, (response) => {
+    launchImageLibrary(options, response => {
       if (response.didCancel || response.errorCode) {
         console.log('Image picker cancelled or error:', response.errorMessage);
         return;
@@ -117,8 +125,6 @@ const UserMessage = ({ route }: Props) => {
     });
   };
 
-  
-
   const showImageOptions = () => {
     Alert.alert(
       'Send Image',
@@ -128,13 +134,13 @@ const UserMessage = ({ route }: Props) => {
           text: 'Gallery',
           onPress: selectImageFromGallery,
         },
-       
+
         {
           text: 'Cancel',
           style: 'cancel',
         },
       ],
-      { cancelable: true }
+      { cancelable: true },
     );
   };
 
@@ -270,8 +276,10 @@ const UserMessage = ({ route }: Props) => {
         >
           {!isCurrentUser && (
             <View style={styles.headerAvatarUser}>
-            <Text style={styles.headerAvatarTextUser}>{userData.name[0]}</Text>
-          </View>
+              <Text style={styles.headerAvatarTextUser}>
+                {userData.name[0]}
+              </Text>
+            </View>
           )}
 
           <View
@@ -290,8 +298,8 @@ const UserMessage = ({ route }: Props) => {
                 <Image
                   source={{ uri: messageText }}
                   style={styles.imageMessage}
-                  onError={(error) => console.log('Image load error:', error)}
-                  onLoad={(success) => console.log('Image loaded successfully')}
+                  onError={error => console.log('Image load error:', error)}
+                  onLoad={success => console.log('Image loaded successfully')}
                 />
               ) : (
                 <Text style={styles.messageText}>{item.text}</Text>
@@ -312,8 +320,10 @@ const UserMessage = ({ route }: Props) => {
 
           {isCurrentUser && (
             <View style={styles.headerAvatarUser}>
-            <Text style={styles.headerAvatarTextUser}>{user?.displayName?.charAt(0)}</Text>
-          </View>
+              <Text style={styles.headerAvatarTextUser}>
+                {user?.displayName?.charAt(0)}
+              </Text>
+            </View>
           )}
         </View>
       </View>
@@ -338,14 +348,29 @@ const UserMessage = ({ route }: Props) => {
             <Text style={styles.headerAvatarText}>{userData.name[0]}</Text>
           </View>
 
-          <View>
-            <Text style={styles.headerName}>{userData.name}</Text>
-            <Text style={styles.headerStatus}>
-              {userData.online ? 'Online' : 'Offline'}
-            </Text>
-          </View>
+          <TouchableOpacity
+          style={{width:"60%"}}
+            onPress={() =>
+              navigation.navigate('userProfile' as never, { userData } as never)
+            }
+          >
+            <View>
+              <Text style={styles.headerName}>{userData.name}</Text>
+              <Text style={styles.headerStatus}>
+                {userData.online ? 'Online' : 'Offline'}
+              </Text>
+            </View>
+          </TouchableOpacity>
 
-          <View style={{ flexDirection: 'row', alignItems: 'center', flex: 1 ,gap:30, left:"40%"}}>
+          <View
+            style={{
+              flexDirection: 'row',
+              alignItems: 'center',
+              flex: 1,
+              gap: 30,
+           
+            }}
+          >
             <TouchableOpacity>
               <Feather name="phone" size={24} color="#000" />
             </TouchableOpacity>
@@ -453,8 +478,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     flex: 1,
-    marginLeft: 10, 
-   
+    marginLeft: 10,
   },
   headerAvatar: {
     width: 40,
@@ -633,7 +657,7 @@ const styles = StyleSheet.create({
   disabledSendButton: {
     backgroundColor: '#f0f0f0',
   },
-  
+
   imageMessage: {
     width: 200,
     height: 200,

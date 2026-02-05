@@ -9,10 +9,10 @@ import {
   Modal,
 } from 'react-native';
 import Feather from 'react-native-vector-icons/Feather';
-import { contactJson } from '../../../api/ContactJson';
+import { contactJson } from '../../core/services/ContactJson';
 import { useNavigation } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
-import { AppStackParamList } from '../../../navigation/AppNavigator';
+import { AppStackParamList } from '../../core/navigation/AppNavigator';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 type ContactsNavigationProp = NativeStackNavigationProp<AppStackParamList, 'userMsg'>;
@@ -105,7 +105,7 @@ export default function Contacts() {
                 </TouchableOpacity>
                 <TouchableOpacity 
                   style={styles.actionBtn}
-                  onPress={() => handleSendMessage(selectedContact)}
+                  // onPress={() => handleSendMessage(selectedContact)}
                 >
                   <Feather name="message-circle" size={22} color="#007AFF" />
                   <Text>Message</Text>

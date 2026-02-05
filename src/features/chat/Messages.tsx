@@ -10,8 +10,7 @@ import {
   View,
 } from 'react-native';
 import React, { useEffect, useRef, useState } from 'react';
-import {
-  getFirestore,
+import firestore, {
   collection,
   getDocs,
   query,
@@ -26,11 +25,11 @@ import FontAwesome from 'react-native-vector-icons/FontAwesome';
 import { useNavigation } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { Swipeable } from 'react-native-gesture-handler';
-import { useAuth } from '../../../context/AuthContext';
-import { AppStackParamList } from '../../../navigation/TabNavigator';
-import { chatService } from '../../../firebase/chat.service';
-import { contactData } from '../../../api/JsonData';
-import { getUserAvatar } from '../../../utils/avatarUtils';
+import { useAuth } from '../../core/context/AuthContext';
+import { AppStackParamList } from '../../core/navigation/TabNavigator';
+import { chatService } from '../../core/services/chat.service';
+import { contactData } from '../../core/services/JsonData';
+import { getUserAvatar } from '../../shared/utils/avatarUtils';
 
 type MessagesNavigationProp = NativeStackNavigationProp<
   AppStackParamList,
@@ -102,7 +101,7 @@ const Messages = () => {
   useEffect(() => {
     if (!user) return;
 
-    const usersRef = collection(getFirestore(), 'users');
+    const usersRef = collection(firestore(), 'users');
     const q = query(usersRef, where('uid', '!=', user.uid));
 
     const mapUser = (userData: any): User => ({
@@ -159,7 +158,7 @@ const Messages = () => {
     users.forEach((u: User) => {
       const chatId = chatService.getChatId(user.uid, u.uid);
       const messagesRef = collection(
-        getFirestore(),
+        firestore(),
         `chats/${chatId}/messages`,
       );
 
@@ -195,7 +194,7 @@ const Messages = () => {
     users.forEach((u: User) => {
       const chatId = chatService.getChatId(user.uid, u.uid);
       const messagesRef = collection(
-        getFirestore(),
+        firestore(),
         `chats/${chatId}/messages`,
       );
 
@@ -423,7 +422,7 @@ const Messages = () => {
 
 export default Messages;
 
-// ... rest of the styles remain the same
+
 
 const styles = StyleSheet.create({
   animatedSearchContainer: {

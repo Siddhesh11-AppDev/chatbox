@@ -1,15 +1,15 @@
 import { StyleSheet, Text, View } from 'react-native';
 import React from 'react';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
-import Messages from '../screens/home/message/Messages';
-import Calls from '../screens/home/calls/Calls';
-import Contacts from '../screens/home/contacts/Contacts';
-import Settings from '../screens/home/settings/Settings';
+import Messages from '../../features/chat/Messages';
+import Calls from '../../features/calls/Calls';
+import Contacts from '../../features/contacts/Contacts';
+import Settings from '../../features/user/Settings';
 import FontAwesome from 'react-native-vector-icons/FontAwesome';
 import AntDesign from 'react-native-vector-icons/AntDesign';
 import Ionicons from 'react-native-vector-icons/Ionicons';
 import Feather from 'react-native-vector-icons/Feather';
-import ToastExample from '../components/ToastExample';
+import ToastExample from '../../shared/components/ToastExample';
 
 // Extend the Tab navigator to include the userMsg route
 export type AppStackParamList = {

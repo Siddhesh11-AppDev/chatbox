@@ -1,6 +1,6 @@
 import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, updateProfile, signOut } from '@react-native-firebase/auth';
 import { getFirestore, doc, setDoc, getDoc, updateDoc } from '@react-native-firebase/firestore';
-import { getDatabase, ref, set, update } from '@react-native-firebase/database'; // Added RTDB imports
+import { getDatabase, ref, set, update } from '@react-native-firebase/database'; 
 import { COLLECTIONS } from './collection';
 
 interface SignUpCredentials {
@@ -23,7 +23,7 @@ interface UserResponse {
 class AuthService {
     private auth = getAuth();
     private firestore = getFirestore();
-    private database = getDatabase(); // Added RTDB instance
+    private database = getDatabase(); 
 
     constructor() {
         

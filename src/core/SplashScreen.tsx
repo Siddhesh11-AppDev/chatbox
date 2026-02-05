@@ -1,10 +1,10 @@
 import { Image, StatusBar, StyleSheet, Text, View } from 'react-native';
 import React, { useEffect } from 'react';
-import { Images } from '../assets/images';
-import { Colors } from '../theme/Colors';
+import { Images } from '../shared/assets/images';
+import { Colors } from '../shared/theme/Colors';
 import { useNavigation } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
-import { AppStackParamList } from '../navigation/AppNavigator';
+import { AppStackParamList } from './navigation/AppNavigator';
 
 type SplashScreenNavigationProp = NativeStackNavigationProp<
   AppStackParamList,

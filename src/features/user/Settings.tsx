@@ -11,13 +11,13 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Feather from 'react-native-vector-icons/Feather';
 import MaterialDesignIcons from 'react-native-vector-icons/MaterialCommunityIcons';
-import AppButton from '../../../components/AppButton';
+import AppButton from '../../shared/components/AppButton';
 import { launchCamera, launchImageLibrary } from 'react-native-image-picker';
 
-import { authService } from '../../../firebase/auth.service';
-import { useAuth } from '../../../context/AuthContext';
-import { getUserAvatar } from '../../../utils/avatarUtils';
-import ToastHelper from '../../../utils/ToastHelper';
+import { authService } from '../../core/services/auth.service';
+import { useAuth } from '../../core/context/AuthContext';
+import { getUserAvatar } from '../../shared/utils/avatarUtils';
+import { ToastHelper } from '../../shared/utils/ToastHelper';
 
 const settingsOptions = [
   {
@@ -106,7 +106,7 @@ export default function Settings() {
 
           <TouchableOpacity
             style={{ flex: 1, marginLeft: 12 }}
-            onPress={() => navigation.navigate('userProfile' as never)}
+           
           >
             <Text style={styles.profileName}>
               {user?.displayName || 'User'}
