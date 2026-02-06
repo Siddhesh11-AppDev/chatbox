@@ -10,6 +10,7 @@ import React from 'react';
 import { Images } from '../../shared/assets/images';
 import AppButton from '../../shared/components/AppButton';
 import { useNavigation } from '@react-navigation/native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 
 const OnBoarding = () => {
   const navigation = useNavigation();
@@ -23,7 +24,7 @@ const OnBoarding = () => {
   };
 
   return (
-    <View style={styles.container}>
+    <SafeAreaView  style={styles.container}>
       <StatusBar barStyle="light-content" />
 
       {/* Background Image */}
@@ -83,7 +84,7 @@ const OnBoarding = () => {
           </TouchableOpacity>
         </View>
       </View>
-    </View>
+    </SafeAreaView >
   );
 };
 

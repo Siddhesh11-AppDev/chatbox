@@ -30,6 +30,7 @@ import { AppStackParamList } from '../../core/navigation/TabNavigator';
 import { chatService } from '../../core/services/chat.service';
 import { contactData } from '../../core/services/JsonData';
 import { getUserAvatar } from '../../shared/utils/avatarUtils';
+import { SafeAreaView } from 'react-native-safe-area-context';
 
 type MessagesNavigationProp = NativeStackNavigationProp<
   AppStackParamList,
@@ -353,7 +354,7 @@ const Messages = () => {
   );
 
   return (
-    <View style={{ flex: 1, backgroundColor: '#000' }}>
+    <SafeAreaView style={{ flex: 1, backgroundColor: '#000' }}>
       <StatusBar barStyle="light-content" backgroundColor="#000" />
 
       <Animated.FlatList
@@ -386,12 +387,12 @@ const Messages = () => {
                   {getLastMessage(item.uid)?.startsWith('image:') ? 'IMG' : getLastMessage(item.uid) || 'Tap to start chatting'}
                 </Text>
               </View>
-
+             {/* 
               {item.online && (
                 <View style={styles.onlineIndicator}>
                   <Text style={styles.onlineText}>ONLINE</Text>
                 </View>
-              )}
+              )} */}
 
               {getUnreadCount(item.uid) > 0 && (
                 <View style={styles.unreadBadge}>
@@ -416,7 +417,7 @@ const Messages = () => {
           </View>
         )}
       />
-    </View>
+    </SafeAreaView>
   );
 };
 

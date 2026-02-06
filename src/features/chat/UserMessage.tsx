@@ -11,6 +11,7 @@ import {
   KeyboardAvoidingView,
   Platform,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import Feather from 'react-native-vector-icons/Feather';
 import AntDesign from 'react-native-vector-icons/AntDesign';
 import Entypo from 'react-native-vector-icons/Entypo';
@@ -331,8 +332,11 @@ const UserMessage = ({ route }: Props) => {
   };
 
   return (
+    <SafeAreaView  style={styles.container} >
+
     <KeyboardAvoidingView
-      style={styles.container}
+     
+       style={{ flex: 1 }}
       behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
     >
       <StatusBar barStyle="dark-content" backgroundColor="#FFF" />
@@ -452,6 +456,7 @@ const UserMessage = ({ route }: Props) => {
         )}
       </View>
     </KeyboardAvoidingView>
+        </SafeAreaView>
   );
 };
 

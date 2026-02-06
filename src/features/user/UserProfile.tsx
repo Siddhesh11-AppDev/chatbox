@@ -18,6 +18,7 @@ import { useNavigation } from '@react-navigation/native';
 import firestore from '@react-native-firebase/firestore';
 import { getAuth, updateProfile } from '@react-native-firebase/auth';
 import { getUserAvatar } from '../../shared/utils/avatarUtils';
+import { SafeAreaView } from 'react-native-safe-area-context';
 
 const UserProfile = ({ route }: { route: { params: { userData: any } } }) => {
   const navigation = useNavigation();
@@ -182,7 +183,7 @@ const UserProfile = ({ route }: { route: { params: { userData: any } } }) => {
   // };
 
   return (
-    <View style={styles.container}>
+    <SafeAreaView  style={styles.container}>
       <StatusBar barStyle="light-content" />
 
       {/* Header */}
@@ -255,7 +256,7 @@ const UserProfile = ({ route }: { route: { params: { userData: any } } }) => {
           </View>
         </ScrollView>
       </View>
-    </View>
+    </SafeAreaView >
   );
 };
 

@@ -17,6 +17,7 @@ import AppButton from '../../shared/components/AppButton';
 import { Images } from '../../shared/assets/images';
 import { authService } from '../../core/services/auth.service';
 import { ToastHelper } from '../../shared/utils/ToastHelper';
+import { SafeAreaView } from 'react-native-safe-area-context';
 
 const Signin = () => {
   const navigation = useNavigation();
@@ -130,8 +131,12 @@ const Signin = () => {
   };
 
   return (
+
+    <SafeAreaView   style={{ flex: 1, backgroundColor: '#FFF' }}>
+
+  
     <KeyboardAvoidingView
-      style={{ flex: 1, backgroundColor: '#FFF' }}
+      style={{ flex: 1,}}
       behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
     >
       <ScrollView
@@ -250,6 +255,7 @@ const Signin = () => {
         </View>
       </ScrollView>
     </KeyboardAvoidingView>
+      </SafeAreaView>
   );
 };
 

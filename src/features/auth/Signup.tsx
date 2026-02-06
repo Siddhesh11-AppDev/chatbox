@@ -15,6 +15,7 @@ import AppTextInput from '../../shared/components/AppTextInput';
 import AppButton from '../../shared/components/AppButton';
 import { authService } from '../../core/services/auth.service';
 import { ToastHelper } from '../../shared/utils/ToastHelper';
+import { SafeAreaView } from 'react-native-safe-area-context';
 
 const Signup = () => {
   const navigation = useNavigation();
@@ -159,8 +160,11 @@ const Signup = () => {
   };
 
   return (
+    <SafeAreaView  style={{ flex: 1, backgroundColor: '#FFF' }}>
+
+   
     <KeyboardAvoidingView
-      style={{ flex: 1, backgroundColor: '#FFF' }}
+      style={{ flex: 1,}}
       behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
     >
       <ScrollView
@@ -271,6 +275,7 @@ const Signup = () => {
         </View>
       </ScrollView>
     </KeyboardAvoidingView>
+     </SafeAreaView>
   );
 };
 
