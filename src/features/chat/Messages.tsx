@@ -109,19 +109,24 @@ const checkConversationUsers = async (userList: User[]) => {
   
   for (const targetUser of userList) {
     const chatId = chatService.getChatId(user.uid, targetUser.uid);
-    const messagesRef = collection(firestore(), `chats/${chatId}/messages`);
     
     try {
-      const snapshot = await getDocs(messagesRef);
-      if (!snapshot.empty) {
-        // Check if this conversation is marked as deleted for current user
-        const chatDocRef = doc(firestore(), 'chats', chatId);
-        const chatDoc = await chatDocRef.get();
+      // Check if this conversation is marked as deleted for current user
+      const chatDocRef = doc(firestore(), 'chats', chatId);
+      const chatDoc = await chatDocRef.get();
+      
+      if (chatDoc.exists) {
         const chatData = chatDoc.data();
         
-        // If not deleted for current user, include in conversation list
+        // If chat is not marked as deleted for current user, include in conversation list
         if (!chatData?.deleted_for_users?.includes(user.uid)) {
-          usersWithConversations.push(targetUser);
+          // Also check if there are messages in this chat
+          const messagesRef = collection(firestore(), `chats/${chatId}/messages`);
+          const snapshot = await getDocs(messagesRef);
+          
+          if (!snapshot.empty) {
+            usersWithConversations.push(targetUser);
+          }
         }
       }
     } catch (error) {
@@ -170,7 +175,7 @@ const checkConversationUsers = async (userList: User[]) => {
 
     fetchUsers();
 
-    const unsubscribe = onSnapshot(q, snapshot => {
+    const unsubscribeUsers = onSnapshot(q, snapshot => {
       const userList: User[] = [];
       snapshot.forEach((doc: any) => {
         userList.push(mapUser(doc.data()));
@@ -179,16 +184,31 @@ const checkConversationUsers = async (userList: User[]) => {
       checkConversationUsers(userList);
     });
 
-    return () => unsubscribe();
+    // Additionally subscribe to chat changes to detect when deleted conversations get new messages
+    const unsubscribeChats = firestore()
+      .collection('chats')
+      .where('participants', 'array-contains', user.uid)
+      .onSnapshot(chatSnapshot => {
+        // Refresh conversation list when chat documents change
+        checkConversationUsers(users);
+      });
+
+    return () => {
+      unsubscribeUsers();
+      unsubscribeChats(); // Clean up the chat listener as well
+    };
   }, [user]);
 
   // Set up listeners for unread message counts
   useEffect(() => {
-    if (!user || !conversationUsers.length) return;
+    if (!user) return;
 
+    // Use all users (not just conversationUsers) to detect when a deleted conversation gets new messages
+    const usersToCheck = conversationUsers.length > 0 ? conversationUsers : users;
+    
     const unsubs: any[] = [];
 
-    conversationUsers.forEach((u: User) => {
+    usersToCheck.forEach((u: User) => {
       const chatId = chatService.getChatId(user.uid, u.uid);
       const messagesRef = collection(firestore(), `chats/${chatId}/messages`);
 
@@ -204,6 +224,13 @@ const checkConversationUsers = async (userList: User[]) => {
           ...prev,
           [u.uid]: count,
         }));
+        
+        // Check if this user should be in conversation list but isn't
+        const isInConversationList = conversationUsers.some(convUser => convUser.uid === u.uid);
+        if (count > 0 && !isInConversationList) {
+          // Refresh the conversation list since a new message arrived
+          checkConversationUsers(users);
+        }
       });
 
       unsubs.push(unsubscribe);
@@ -212,15 +239,18 @@ const checkConversationUsers = async (userList: User[]) => {
     return () => {
       unsubs.forEach(unsub => unsub());
     };
-  }, [conversationUsers, user]);
+  }, [conversationUsers, user, users]);
 
   // Set up listeners for last messages
   useEffect(() => {
-    if (!user || !conversationUsers.length) return;
+    if (!user) return;
 
+    // Use all users (not just conversationUsers) to detect when a deleted conversation gets new messages
+    const usersToCheck = conversationUsers.length > 0 ? conversationUsers : users;
+    
     const unsubs: any[] = [];
 
-    conversationUsers.forEach((u: User) => {
+    usersToCheck.forEach((u: User) => {
       const chatId = chatService.getChatId(user.uid, u.uid);
       const messagesRef = collection(firestore(), `chats/${chatId}/messages`);
 
@@ -234,6 +264,13 @@ const checkConversationUsers = async (userList: User[]) => {
             ...prev,
             [u.uid]: messageData.text || '',
           }));
+          
+          // Check if this user should be in conversation list but isn't
+          const isInConversationList = conversationUsers.some(convUser => convUser.uid === u.uid);
+          if (!isInConversationList) {
+            // Refresh the conversation list since a new message arrived
+            checkConversationUsers(users);
+          }
         } else {
           setLastMessages(prev => ({
             ...prev,
@@ -248,17 +285,19 @@ const checkConversationUsers = async (userList: User[]) => {
     return () => {
       unsubs.forEach(unsub => unsub());
     };
-  }, [conversationUsers, user]);
+  }, [conversationUsers, user, users]);
 
 
 
-// Delete conversation function
+// Delete conversation function - unilateral deletion for current user
+// This removes all conversation data for the current user but keeps it for the other user
+// When starting a new conversation later, it will be fresh and empty
 const deleteConversation = async (targetUser: User) => {
   if (!user) return;
 
   Alert.alert(
     'Delete Conversation',
-    `Are you sure you want to delete your conversation with ${targetUser.name}?`,
+    `Are you sure you want to delete your conversation with ${targetUser.name}? This will remove all messages locally.`,
     [
       {
         text: 'Cancel',
@@ -271,26 +310,29 @@ const deleteConversation = async (targetUser: User) => {
           try {
             const chatId = chatService.getChatId(user.uid, targetUser.uid);
             
-            // Delete all messages in the conversation
+            // Delete all messages in the conversation for current user
             const messagesRef = collection(firestore(), `chats/${chatId}/messages`);
             const messagesSnapshot = await getDocs(messagesRef);
             
-            // Delete each message document
+            // Delete each message document in a batch operation
             const batch = firestore().batch();
             messagesSnapshot.forEach((doc) => {
               batch.delete(doc.ref);
             });
             
-            // Also delete the chat document itself
+            // Update the chat document to track that current user has deleted this conversation
+            // This allows for a fresh start when creating a new conversation
             const chatDocRef = doc(firestore(), 'chats', chatId);
-            batch.delete(chatDocRef);
+            await chatDocRef.update({
+              deleted_for_users: firestore.FieldValue.arrayUnion(user.uid)
+            });
             
             await batch.commit();
             
             // Update local state to remove the user from conversation list
             setConversationUsers(prev => prev.filter(u => u.uid !== targetUser.uid));
             
-            // Also remove from unread counts and last messages
+            // Clear related state
             setUnreadCounts(prev => {
               const newCounts = { ...prev };
               delete newCounts[targetUser.uid];
@@ -303,7 +345,7 @@ const deleteConversation = async (targetUser: User) => {
               return newMessages;
             });
             
-            console.log(`Conversation with ${targetUser.name} deleted successfully`);
+            console.log(`Conversation with ${targetUser.name} deleted for current user`);
           } catch (error) {
             console.error('Error deleting conversation:', error);
             Alert.alert('Error', 'Failed to delete conversation. Please try again.');
@@ -314,57 +356,7 @@ const deleteConversation = async (targetUser: User) => {
   );
 };
 
-// Soft delete conversation (only for current user)
-const softDeleteConversation = async (targetUser: User) => {
-  if (!user) return;
 
-  Alert.alert(
-    'Delete Conversation',
-    `Are you sure you want to delete your conversation with ${targetUser.name}?`,
-    [
-      {
-        text: 'Cancel',
-        style: 'cancel',
-      },
-      {
-        text: 'Delete',
-        style: 'destructive',
-        onPress: async () => {
-          try {
-            const chatId = chatService.getChatId(user.uid, targetUser.uid);
-            
-            // Add current user to deleted_for_users array
-            const chatDocRef = doc(firestore(), 'chats', chatId);
-            await chatDocRef.update({
-              deleted_for_users: firestore.FieldValue.arrayUnion(user.uid)
-            });
-            
-            // Update local state to remove the user from conversation list
-            setConversationUsers(prev => prev.filter(u => u.uid !== targetUser.uid));
-            
-            // Also remove from unread counts and last messages
-            setUnreadCounts(prev => {
-              const newCounts = { ...prev };
-              delete newCounts[targetUser.uid];
-              return newCounts;
-            });
-            
-            setLastMessages(prev => {
-              const newMessages = { ...prev };
-              delete newMessages[targetUser.uid];
-              return newMessages;
-            });
-            
-            console.log(`Conversation with ${targetUser.name} hidden successfully`);
-          } catch (error) {
-            console.error('Error hiding conversation:', error);
-            Alert.alert('Error', 'Failed to hide conversation. Please try again.');
-          }
-        },
-      },
-    ]
-  );
-};
 
 
 
@@ -425,6 +417,13 @@ const softDeleteConversation = async (targetUser: User) => {
     navigation.navigate('userMsg', {
       userData: item,
     });
+  };
+
+  // Function to manually refresh conversation list
+  const refreshConversationList = async () => {
+    if (user && users.length > 0) {
+      await checkConversationUsers(users);
+    }
   };
 
   const ListHeader = () => (
@@ -577,6 +576,7 @@ const softDeleteConversation = async (targetUser: User) => {
     </SafeAreaView>
   );
 };
+
 
 export default Messages;
 

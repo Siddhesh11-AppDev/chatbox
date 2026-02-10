@@ -117,6 +117,25 @@ const UserMessage = ({ route }: Props) => {
       const messageText = inputText.trim();
       setInputText('');
       setIsFocused(false);
+      
+      // Get the chat ID before sending the message
+      const chatId = chatService.getChatId(user.uid, userData.uid);
+      
+      // Remove current user from deleted_for_users array to "undelete" the conversation
+      const chatDocRef = firestore().doc(`chats/${chatId}`);
+      const chatDoc = await chatDocRef.get();
+      
+      if (chatDoc.exists) {
+        const chatData = chatDoc.data();
+        if (chatData?.deleted_for_users?.includes(user.uid)) {
+          // Remove current user from the deleted array
+          await chatDocRef.update({
+            deleted_for_users: firestore.FieldValue.arrayRemove(user.uid)
+          });
+        }
+      }
+      
+      // Send the message after potentially "undeleting" the conversation
       await chatService.sendMessage(user.uid, userData.uid, messageText);
       setTimeout(() => {
         flatListRef.current?.scrollToEnd({ animated: true });
@@ -130,7 +149,24 @@ const UserMessage = ({ route }: Props) => {
     if (!user) return;
 
     try {
-      // Send the image URI as a text message with a prefix indicating it's an image
+      // Get the chat ID before sending the message
+      const chatId = chatService.getChatId(user.uid, userData.uid);
+      
+      // Remove current user from deleted_for_users array to "undelete" the conversation
+      const chatDocRef = firestore().doc(`chats/${chatId}`);
+      const chatDoc = await chatDocRef.get();
+      
+      if (chatDoc.exists) {
+        const chatData = chatDoc.data();
+        if (chatData?.deleted_for_users?.includes(user.uid)) {
+          // Remove current user from the deleted array
+          await chatDocRef.update({
+            deleted_for_users: firestore.FieldValue.arrayRemove(user.uid)
+          });
+        }
+      }
+      
+      // Send the image message after potentially "undeleting" the conversation
       await chatService.sendMessage(
         user.uid,
         userData.uid,
