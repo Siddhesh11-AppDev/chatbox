@@ -8,6 +8,7 @@ import {
   TextInput,
   TouchableOpacity,
   View,
+  Alert
 } from 'react-native';
 import React, { useEffect, useRef, useState } from 'react';
 import firestore, {
@@ -19,6 +20,8 @@ import firestore, {
   orderBy,
   limit,
   startAfter,
+  deleteDoc,
+  doc
 } from '@react-native-firebase/firestore';
 import Feather from 'react-native-vector-icons/Feather';
 import FontAwesome from 'react-native-vector-icons/FontAwesome';
@@ -43,61 +46,93 @@ interface User {
   email: string;
   profile_image?: string;
   online?: boolean;
-  last_message?: string; // must always be string
+  last_message?: string;
   last_message_time?: any;
   unread_count?: number;
+  deleted_for_user?: boolean;
 }
 
 const Messages = () => {
   const scrollY = useRef(new Animated.Value(0)).current;
-  const searchWidth = useRef(new Animated.Value(40)).current; // Start with small width (icon size)
-  const searchOpacity = useRef(new Animated.Value(0)).current; // Start hidden
+  const searchWidth = useRef(new Animated.Value(40)).current;
+  const searchOpacity = useRef(new Animated.Value(0)).current;
   const navigation = useNavigation<MessagesNavigationProp>();
   const { user } = useAuth();
   const [users, setUsers] = useState<User[]>([]);
+  const [conversationUsers, setConversationUsers] = useState<User[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
-  const [isSearchActive, setIsSearchActive] = useState(false); // Track search state
-  const [unreadCounts, setUnreadCounts] = useState<{ [key: string]: number }>(
-    {},
-  );
-  const [lastMessages, setLastMessages] = useState<{ [key: string]: string }>(
-    {},
-  );
+  const [isSearchActive, setIsSearchActive] = useState(false);
+  const [isSearching, setIsSearching] = useState(false); // New state for search mode
+  const [unreadCounts, setUnreadCounts] = useState<{ [key: string]: number }>({});
+  const [lastMessages, setLastMessages] = useState<{ [key: string]: string }>({});
 
   // Toggle search bar animation
   const toggleSearchBar = () => {
     if (isSearchActive) {
-      // Close search bar
       Animated.parallel([
         Animated.timing(searchWidth, {
-          toValue: 40, // Back to icon size
+          toValue: 40,
           duration: 200,
           useNativeDriver: false,
         }),
         Animated.timing(searchOpacity, {
-          toValue: 0, // Fade out
+          toValue: 0,
           duration: 150,
           useNativeDriver: false,
         }),
       ]).start();
+      setIsSearching(false); // Exit search mode
     } else {
-      // Open search bar
       Animated.parallel([
         Animated.timing(searchWidth, {
-          toValue: 350, // Expand to desired width
+          toValue: 350,
           duration: 250,
           useNativeDriver: false,
         }),
         Animated.timing(searchOpacity, {
-          toValue: 1, // Fade in
+          toValue: 1,
           duration: 200,
-          delay: 50, // Slight delay to show width expansion first
+          delay: 50,
           useNativeDriver: false,
         }),
       ]).start();
+      setIsSearching(true); // Enter search mode
     }
     setIsSearchActive(!isSearchActive);
   };
+
+// Function to check which users have conversations with current user
+const checkConversationUsers = async (userList: User[]) => {
+  if (!user) return;
+  
+  const usersWithConversations: User[] = [];
+  
+  for (const targetUser of userList) {
+    const chatId = chatService.getChatId(user.uid, targetUser.uid);
+    const messagesRef = collection(firestore(), `chats/${chatId}/messages`);
+    
+    try {
+      const snapshot = await getDocs(messagesRef);
+      if (!snapshot.empty) {
+        // Check if this conversation is marked as deleted for current user
+        const chatDocRef = doc(firestore(), 'chats', chatId);
+        const chatDoc = await chatDocRef.get();
+        const chatData = chatDoc.data();
+        
+        // If not deleted for current user, include in conversation list
+        if (!chatData?.deleted_for_users?.includes(user.uid)) {
+          usersWithConversations.push(targetUser);
+        }
+      }
+    } catch (error) {
+      console.error(`Error checking conversation for user ${targetUser.uid}:`, error);
+    }
+  }
+  
+  setConversationUsers(usersWithConversations);
+};
+
+
 
   useEffect(() => {
     if (!user) return;
@@ -109,20 +144,16 @@ const Messages = () => {
       uid: userData.uid,
       name: userData.name || '',
       email: userData.email || '',
-      profile_image:
-        userData.profile_image ||
-        getUserAvatar({
-          displayName: userData.name,
-          photoURL: userData.profile_image,
-        }),
+      profile_image: userData.profile_image || getUserAvatar({
+        displayName: userData.name,
+        photoURL: userData.profile_image,
+      }),
       online: !!userData.online,
-      last_message:
-        typeof userData.last_message === 'string' ? userData.last_message : '',
+      last_message: typeof userData.last_message === 'string' ? userData.last_message : '',
       last_message_time: userData.last_message_time || null,
       unread_count: userData.unread_count || 0,
     });
 
-    // Initial fetch
     const fetchUsers = async () => {
       try {
         const snapshot = await getDocs(q);
@@ -131,6 +162,7 @@ const Messages = () => {
           userList.push(mapUser(doc.data()));
         });
         setUsers(userList);
+        await checkConversationUsers(userList);
       } catch (error) {
         console.error('Error fetching users:', error);
       }
@@ -138,13 +170,13 @@ const Messages = () => {
 
     fetchUsers();
 
-    // Real-time listener
     const unsubscribe = onSnapshot(q, snapshot => {
       const userList: User[] = [];
       snapshot.forEach((doc: any) => {
         userList.push(mapUser(doc.data()));
       });
       setUsers(userList);
+      checkConversationUsers(userList);
     });
 
     return () => unsubscribe();
@@ -152,25 +184,22 @@ const Messages = () => {
 
   // Set up listeners for unread message counts
   useEffect(() => {
-    if (!user || !users.length) return;
+    if (!user || !conversationUsers.length) return;
 
     const unsubs: any[] = [];
 
-    users.forEach((u: User) => {
+    conversationUsers.forEach((u: User) => {
       const chatId = chatService.getChatId(user.uid, u.uid);
-      const messagesRef = collection(
-        firestore(),
-        `chats/${chatId}/messages`,
-      );
+      const messagesRef = collection(firestore(), `chats/${chatId}/messages`);
 
       const q = query(
         messagesRef,
-        where('receiverId', '==', user.uid), // Messages sent to current user
-        where('read', '==', false), // Only unread messages
+        where('receiverId', '==', user.uid),
+        where('read', '==', false),
       );
 
       const unsubscribe = onSnapshot(q, snapshot => {
-        const count = snapshot?.size || 0; // Safely access the size property
+        const count = snapshot?.size || 0;
         setUnreadCounts(prev => ({
           ...prev,
           [u.uid]: count,
@@ -180,24 +209,20 @@ const Messages = () => {
       unsubs.push(unsubscribe);
     });
 
-    // Clean up all listeners when component unmounts or users list changes
     return () => {
       unsubs.forEach(unsub => unsub());
     };
-  }, [users, user]);
+  }, [conversationUsers, user]);
 
   // Set up listeners for last messages
   useEffect(() => {
-    if (!user || !users.length) return;
+    if (!user || !conversationUsers.length) return;
 
     const unsubs: any[] = [];
 
-    users.forEach((u: User) => {
+    conversationUsers.forEach((u: User) => {
       const chatId = chatService.getChatId(user.uid, u.uid);
-      const messagesRef = collection(
-        firestore(),
-        `chats/${chatId}/messages`,
-      );
+      const messagesRef = collection(firestore(), `chats/${chatId}/messages`);
 
       const q = query(messagesRef, orderBy('timestamp', 'desc'), limit(1));
 
@@ -210,7 +235,6 @@ const Messages = () => {
             [u.uid]: messageData.text || '',
           }));
         } else {
-          // If no messages in the chat, set empty string
           setLastMessages(prev => ({
             ...prev,
             [u.uid]: '',
@@ -221,40 +245,177 @@ const Messages = () => {
       unsubs.push(unsubscribe);
     });
 
-    // Clean up all listeners when component unmounts or users list changes
     return () => {
       unsubs.forEach(unsub => unsub());
     };
-  }, [users, user]);
+  }, [conversationUsers, user]);
 
-  // Function to get unread count for a specific user
+
+
+// Delete conversation function
+const deleteConversation = async (targetUser: User) => {
+  if (!user) return;
+
+  Alert.alert(
+    'Delete Conversation',
+    `Are you sure you want to delete your conversation with ${targetUser.name}?`,
+    [
+      {
+        text: 'Cancel',
+        style: 'cancel',
+      },
+      {
+        text: 'Delete',
+        style: 'destructive',
+        onPress: async () => {
+          try {
+            const chatId = chatService.getChatId(user.uid, targetUser.uid);
+            
+            // Delete all messages in the conversation
+            const messagesRef = collection(firestore(), `chats/${chatId}/messages`);
+            const messagesSnapshot = await getDocs(messagesRef);
+            
+            // Delete each message document
+            const batch = firestore().batch();
+            messagesSnapshot.forEach((doc) => {
+              batch.delete(doc.ref);
+            });
+            
+            // Also delete the chat document itself
+            const chatDocRef = doc(firestore(), 'chats', chatId);
+            batch.delete(chatDocRef);
+            
+            await batch.commit();
+            
+            // Update local state to remove the user from conversation list
+            setConversationUsers(prev => prev.filter(u => u.uid !== targetUser.uid));
+            
+            // Also remove from unread counts and last messages
+            setUnreadCounts(prev => {
+              const newCounts = { ...prev };
+              delete newCounts[targetUser.uid];
+              return newCounts;
+            });
+            
+            setLastMessages(prev => {
+              const newMessages = { ...prev };
+              delete newMessages[targetUser.uid];
+              return newMessages;
+            });
+            
+            console.log(`Conversation with ${targetUser.name} deleted successfully`);
+          } catch (error) {
+            console.error('Error deleting conversation:', error);
+            Alert.alert('Error', 'Failed to delete conversation. Please try again.');
+          }
+        },
+      },
+    ]
+  );
+};
+
+// Soft delete conversation (only for current user)
+const softDeleteConversation = async (targetUser: User) => {
+  if (!user) return;
+
+  Alert.alert(
+    'Delete Conversation',
+    `Are you sure you want to delete your conversation with ${targetUser.name}?`,
+    [
+      {
+        text: 'Cancel',
+        style: 'cancel',
+      },
+      {
+        text: 'Delete',
+        style: 'destructive',
+        onPress: async () => {
+          try {
+            const chatId = chatService.getChatId(user.uid, targetUser.uid);
+            
+            // Add current user to deleted_for_users array
+            const chatDocRef = doc(firestore(), 'chats', chatId);
+            await chatDocRef.update({
+              deleted_for_users: firestore.FieldValue.arrayUnion(user.uid)
+            });
+            
+            // Update local state to remove the user from conversation list
+            setConversationUsers(prev => prev.filter(u => u.uid !== targetUser.uid));
+            
+            // Also remove from unread counts and last messages
+            setUnreadCounts(prev => {
+              const newCounts = { ...prev };
+              delete newCounts[targetUser.uid];
+              return newCounts;
+            });
+            
+            setLastMessages(prev => {
+              const newMessages = { ...prev };
+              delete newMessages[targetUser.uid];
+              return newMessages;
+            });
+            
+            console.log(`Conversation with ${targetUser.name} hidden successfully`);
+          } catch (error) {
+            console.error('Error hiding conversation:', error);
+            Alert.alert('Error', 'Failed to hide conversation. Please try again.');
+          }
+        },
+      },
+    ]
+  );
+};
+
+
+
   const getUnreadCount = (userId: string) => {
     return unreadCounts[userId] || 0;
   };
 
-  // Function to get last message for a specific user
   const getLastMessage = (userId: string) => {
     const lastMsg = lastMessages[userId];
     if (lastMsg) {
       return lastMsg;
     }
-    // Fallback to original last_message if no Firebase message exists
-    const userObj = users.find(u => u.uid === userId);
+    const userObj = conversationUsers.find(u => u.uid === userId);
     return userObj?.last_message || 'Tap to start chatting';
   };
 
-  const renderRightActions = () => (
+  const renderRightActions = (item: User) => (
     <View style={styles.swipeActions}>
       <TouchableOpacity style={styles.muteButton}>
         <Feather name="bell" size={22} color="#FFF" />
       </TouchableOpacity>
-      <TouchableOpacity style={styles.deleteButton}>
+      <TouchableOpacity style={styles.deleteButton}  onPress={() => deleteConversation(item)}>
         <Feather name="trash-2" size={22} color="#FFF" />
       </TouchableOpacity>
     </View>
   );
 
-  const filteredUsers = users.filter(
+  // Sort users to show those with unread messages at the top
+  const getSortedUsers = () => {
+    const baseUsers = isSearching ? users : conversationUsers;
+    
+    return [...baseUsers].sort((a, b) => {
+      const aUnread = getUnreadCount(a.uid);
+      const bUnread = getUnreadCount(b.uid);
+      
+      // Users with unread messages come first
+      if (aUnread > 0 && bUnread === 0) return -1;
+      if (bUnread > 0 && aUnread === 0) return 1;
+      
+      // Both have unread messages - sort by count (higher first)
+      if (aUnread > 0 && bUnread > 0) {
+        return bUnread - aUnread;
+      }
+      
+      // No unread messages - sort alphabetically
+      return a.name.localeCompare(b.name);
+    });
+  };
+
+  const displayUsers = getSortedUsers();
+  const filteredUsers = displayUsers.filter(
     u =>
       u.name?.toLowerCase().includes(searchQuery.toLowerCase()) ||
       u.email?.toLowerCase().includes(searchQuery.toLowerCase()),
@@ -268,25 +429,24 @@ const Messages = () => {
 
   const ListHeader = () => (
     <>
-      {/* Header */}
       <View style={styles.fixedHeader}>
         <Animated.View
           style={[styles.animatedSearchContainer, { width: searchWidth }]}
         >
           <TouchableOpacity style={styles.searchIcon} onPress={toggleSearchBar}>
-            <Animated.View style={{ opacity: isSearchActive ? 0 : 1 }}>
-              <Feather name="search" size={22} color="#000" />
+            <Animated.View style={{ opacity: isSearchActive ? 1 : 1 }}>
+              <Feather name="search" size={22} color="#000"  />
             </Animated.View>
           </TouchableOpacity>
 
           <Animated.View style={{ opacity: searchOpacity, flex: 1 }}>
             <View style={styles.searchBarContainer}>
-              <Feather
+              {/* <Feather
                 name="search"
                 size={20}
                 color="#000"
                 style={styles.searchIconInBar}
-              />
+              /> */}
               <TextInput
                 placeholder="Search users..."
                 placeholderTextColor="#999"
@@ -311,7 +471,6 @@ const Messages = () => {
         {!isSearchActive && (
           <>
             <Text style={styles.headerTitle}>Home</Text>
-
             <TouchableOpacity onPress={() => navigation.navigate('Settings')}>
               <FontAwesome name="user-circle" size={34} color="#FFF" />
             </TouchableOpacity>
@@ -319,7 +478,6 @@ const Messages = () => {
         )}
       </View>
 
-      {/* Stories - Now showing users with unread messages */}
       <View style={styles.storiesContainer}>
         <FlatList
           data={contactData}
@@ -331,12 +489,10 @@ const Messages = () => {
               <View style={styles.storyRing}>
                 <Image
                   source={{
-                    uri:
-                      item.profile_image ||
-                      getUserAvatar({
-                        displayName: item.name,
-                        photoURL: item.profile_image,
-                      }),
+                    uri: item.profile_image || getUserAvatar({
+                      displayName: item.name,
+                      photoURL: item.profile_image,
+                    }),
                   }}
                   style={styles.storyImage}
                 />
@@ -368,7 +524,7 @@ const Messages = () => {
           { useNativeDriver: true },
         )}
         renderItem={({ item }) => (
-          <Swipeable renderRightActions={renderRightActions}>
+          <Swipeable renderRightActions={() => renderRightActions(item)}>
             <TouchableOpacity
               style={styles.messageItem}
               onPress={() => handleMessagePress(item)}
@@ -377,7 +533,6 @@ const Messages = () => {
                 <View style={styles.avatar}>
                   <Text style={styles.avatarText}>{item.name?.charAt(0)}</Text>
                 </View>
-
                 {item.online && <View style={styles.greenDot} />}
               </View>
 
@@ -387,19 +542,11 @@ const Messages = () => {
                   {getLastMessage(item.uid)?.startsWith('image:') ? 'IMG' : getLastMessage(item.uid) || 'Tap to start chatting'}
                 </Text>
               </View>
-             {/* 
-              {item.online && (
-                <View style={styles.onlineIndicator}>
-                  <Text style={styles.onlineText}>ONLINE</Text>
-                </View>
-              )} */}
 
               {getUnreadCount(item.uid) > 0 && (
                 <View style={styles.unreadBadge}>
                   <Text style={styles.unreadCount}>
-                    {getUnreadCount(item.uid) > 9
-                      ? '9+'
-                      : getUnreadCount(item.uid)}
+                    {getUnreadCount(item.uid) > 9 ? '9+' : getUnreadCount(item.uid)}
                   </Text>
                 </View>
               )}
@@ -407,13 +554,23 @@ const Messages = () => {
           </Swipeable>
         )}
         ListEmptyComponent={() => (
-          // Render empty state when no users are found
           <View style={styles.emptyListContainer}>
             <View style={styles.emptyUserIcon}>
-              <Feather name="user" size={60} color="#9E9E9E" />
+              <Feather 
+                name={isSearching ? "user" : "message-square"} 
+                size={60} 
+                color="#9E9E9E" 
+              />
             </View>
-            <Text style={styles.emptyTitle}>User Not Available</Text>
-            <Text style={styles.emptySubtitle}>Find User By Search</Text>
+            <Text style={styles.emptyTitle}>
+              {isSearching ? "User Not Available" : "No Conversations Yet"}
+            </Text>
+            <Text style={styles.emptySubtitle}>
+              {isSearching 
+                ? "Find User By Search" 
+                : "Find User By Search"
+              }
+            </Text>
           </View>
         )}
       />
@@ -422,8 +579,6 @@ const Messages = () => {
 };
 
 export default Messages;
-
-
 
 const styles = StyleSheet.create({
   animatedSearchContainer: {
@@ -444,7 +599,7 @@ const styles = StyleSheet.create({
   },
   searchInput: {
     flex: 1,
-    marginLeft: 10,
+    // marginLeft: 10,
     marginRight: 10,
     color: '#000',
     fontSize: 16,
@@ -464,7 +619,6 @@ const styles = StyleSheet.create({
     height: 40,
     width: 40,
     borderRadius: 20,
-
     justifyContent: 'center',
     alignItems: 'center',
     left: -10,
@@ -474,9 +628,7 @@ const styles = StyleSheet.create({
     fontSize: 20,
     fontWeight: '600',
   },
-
   storiesContainer: {
-    // paddingVertical: 20,
     height: 120,
     paddingLeft: 10,
     backgroundColor: '#000',
@@ -503,18 +655,15 @@ const styles = StyleSheet.create({
     marginTop: 6,
     maxWidth: 60,
   },
-
   whiteCardTop: {
     height: 30,
     backgroundColor: '#FFF',
     position: 'relative',
   },
-
   listContent: {
     backgroundColor: '#FFF',
     flex: 1,
   },
-
   messageItem: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -522,7 +671,6 @@ const styles = StyleSheet.create({
     paddingVertical: 14,
     borderBottomWidth: 0.5,
     borderBottomColor: 'rgba(0,0,0,0.1)',
-    // backgroundColor:'grey'
   },
   avatarContainer: {
     marginRight: 15,
@@ -532,11 +680,10 @@ const styles = StyleSheet.create({
   avatar: {
     width: 50,
     height: 50,
-
     justifyContent: 'center',
     alignItems: 'center',
   },
-  avatarText:{
+  avatarText: {
     fontSize: 26,
     color: '#FFF',
   },
@@ -574,7 +721,6 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontWeight: 'bold',
   },
-
   swipeActions: {
     flexDirection: 'row',
     backgroundColor: '#EEE',
@@ -598,7 +744,6 @@ const styles = StyleSheet.create({
     height: 40,
     borderRadius: 30,
   },
-
   onlineIndicator: {
     backgroundColor: '#4CAF50',
     borderRadius: 10,

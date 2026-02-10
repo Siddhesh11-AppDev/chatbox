@@ -10,6 +10,7 @@ import TabNavigator from './TabNavigator';
 import { useAuth } from '../context/AuthContext';
 import UserMessage from '../../features/chat/UserMessage';
 import UserProfile from '../../features/user/UserProfile';
+import VideoCall from '../../features/chat/VideoCall';
 
 export type AppStackParamList = {
   Splash: undefined;
@@ -18,6 +19,7 @@ export type AppStackParamList = {
   Tab: undefined;
   userMsg: { userData: any }; // Add this line for user message navigation
   userProfile:  { userData: any };
+  videoCall: { userData: any }
 };
 
 const Stack = createNativeStackNavigator<AppStackParamList>();
@@ -40,6 +42,7 @@ const AppNavigator = () => {
           <Stack.Screen name="Tab" component={TabNavigator} />
           <Stack.Screen name="userMsg" component={UserMessage} />
           <Stack.Screen name="userProfile" component={UserProfile} />
+          <Stack.Screen name="videoCall" component={VideoCall} />
         </>
       ) : (
         <>

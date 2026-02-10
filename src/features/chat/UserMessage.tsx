@@ -10,6 +10,7 @@ import {
   Alert,
   KeyboardAvoidingView,
   Platform,
+  PermissionsAndroid,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Feather from 'react-native-vector-icons/Feather';
@@ -53,8 +54,46 @@ const UserMessage = ({ route }: Props) => {
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputText, setInputText] = useState('');
   const [isFocused, setIsFocused] = useState(false);
+  const [hasCameraPermission, setHasCameraPermission] = useState(false);
 
   const flatListRef = useRef<FlatList>(null);
+
+  // Request camera permission on component mount
+  useEffect(() => {
+    requestCameraPermission();
+  }, []);
+
+  const requestCameraPermission = async () => {
+    if (Platform.OS === 'android') {
+      try {
+        const granted = await PermissionsAndroid.request(
+          PermissionsAndroid.PERMISSIONS.CAMERA,
+          {
+            title: 'Camera Permission',
+            message: 'This app needs access to your camera to take photos',
+            buttonNeutral: 'Ask Me Later',
+            buttonNegative: 'Cancel',
+            buttonPositive: 'OK',
+          },
+        );
+        if (granted === PermissionsAndroid.RESULTS.GRANTED) {
+          console.log('Camera permission granted');
+          setHasCameraPermission(true);
+        } else {
+          console.log('Camera permission denied');
+          Alert.alert(
+            'Permission Denied',
+            'Camera permission is required to take photos',
+          );
+        }
+      } catch (err) {
+        console.warn(err);
+      }
+    } else {
+      // iOS handles permissions differently, usually granted during app installation
+      setHasCameraPermission(true);
+    }
+  };
 
   // Listen to messages
   useEffect(() => {
@@ -126,16 +165,52 @@ const UserMessage = ({ route }: Props) => {
     });
   };
 
+  const captureImageFromCamera = async () => {
+    // Check if we have permission first
+    if (Platform.OS === 'android' && !hasCameraPermission) {
+      const permissionResult = await requestCameraPermission();
+      if (!permissionResult) {
+        return;
+      }
+    }
+
+    const options = {
+      mediaType: 'photo' as MediaType,
+      quality: 0.8 as const,
+      maxWidth: 1000,
+      maxHeight: 1000,
+    };
+
+    launchCamera(options, response => {
+      if (response.didCancel || response.errorCode) {
+        console.log('Camera cancelled or error:', response.errorMessage);
+        Alert.alert(
+          'Error',
+          response.errorMessage || 'Failed to capture image',
+        );
+        return;
+      }
+
+      const asset = response.assets?.[0];
+      if (asset && asset.uri) {
+        handleSendImage(asset.uri);
+      }
+    });
+  };
+
   const showImageOptions = () => {
     Alert.alert(
       'Send Image',
       'How would you like to add an image?',
       [
         {
+          text: 'Camera',
+          onPress: captureImageFromCamera,
+        },
+        {
           text: 'Gallery',
           onPress: selectImageFromGallery,
         },
-
         {
           text: 'Cancel',
           style: 'cancel',
@@ -332,131 +407,141 @@ const UserMessage = ({ route }: Props) => {
   };
 
   return (
-    <SafeAreaView  style={styles.container} >
+    <SafeAreaView style={styles.container}>
+      <KeyboardAvoidingView
+        style={{ flex: 1 }}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      >
+        <StatusBar barStyle="dark-content" backgroundColor="#FFF" />
 
-    <KeyboardAvoidingView
-     
-       style={{ flex: 1 }}
-      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-    >
-      <StatusBar barStyle="dark-content" backgroundColor="#FFF" />
+        {/* Header */}
+        <View style={styles.header}>
+          <TouchableOpacity onPress={() => navigation.goBack()}>
+            <Feather name="arrow-left" size={22} color="#000" />
+          </TouchableOpacity>
 
-      {/* Header */}
-      <View style={styles.header}>
-        <TouchableOpacity onPress={() => navigation.goBack()}>
-          <Feather name="arrow-left" size={22} color="#000" />
-        </TouchableOpacity>
-
-        <View style={styles.headerCenter}>
-          <View style={styles.headerAvatar}>
-            <Text style={styles.headerAvatarText}>{userData.name[0]}</Text>
-          </View>
-
-          <TouchableOpacity
-          style={{width:"60%"}}
-            onPress={() =>
-              navigation.navigate('userProfile' as never, { userData } as never)
-            }
-          >
-            <View>
-              <Text style={styles.headerName}>{userData.name}</Text>
-              <Text style={styles.headerStatus}>
-                {userData.online ? 'Online' : 'Offline'}
-              </Text>
+          <View style={styles.headerCenter}>
+            <View style={styles.headerAvatar}>
+              <Text style={styles.headerAvatarText}>{userData.name[0]}</Text>
             </View>
-          </TouchableOpacity>
 
-          <View
-            style={{
-              flexDirection: 'row',
-              alignItems: 'center',
-              flex: 1,
-              gap: 30,
-           
-            }}
-          >
-            <TouchableOpacity>
-              <Feather name="phone" size={24} color="#000" />
+            <TouchableOpacity
+              style={{ width: '60%' }}
+              onPress={() =>
+                navigation.navigate(
+                  'userProfile' as never,
+                  { userData } as never,
+                )
+              }
+            >
+              <View>
+                <Text style={styles.headerName}>{userData.name}</Text>
+                <Text style={styles.headerStatus}>
+                  {userData.online ? 'Online' : 'Offline'}
+                </Text>
+              </View>
             </TouchableOpacity>
-            <TouchableOpacity>
-              <Feather name="video" size={24} color="#000" />
-            </TouchableOpacity>
+
+            <View
+              style={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                flex: 1,
+                gap: 30,
+              }}
+            >
+              <TouchableOpacity>
+                <Feather name="phone" size={24} color="#000" />
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={() =>
+                  navigation.navigate(
+                    'videoCall' as never,
+                    { userData } as never,
+                  )
+                }
+              >
+                <Feather name="video" size={24} color="#000" />
+              </TouchableOpacity>
+            </View>
           </View>
         </View>
-      </View>
 
-      {/* Messages */}
-      <FlatList
-        ref={flatListRef}
-        data={messages}
-        keyExtractor={(item, index) => (item.id ? item.id : `msg-${index}`)}
-        renderItem={renderItem}
-        showsVerticalScrollIndicator={false}
-        contentContainerStyle={styles.listContent}
-      />
+        {/* Messages */}
+        <FlatList
+          ref={flatListRef}
+          data={messages}
+          keyExtractor={(item, index) => (item.id ? item.id : `msg-${index}`)}
+          renderItem={renderItem}
+          showsVerticalScrollIndicator={false}
+          contentContainerStyle={styles.listContent}
+        />
 
-      {/* INPUT BAR */}
-      <View style={styles.inputWrapper}>
-        <TouchableOpacity onPress={showImageOptions}>
-          <Entypo name="attachment" size={24} color="#000" />
-        </TouchableOpacity>
-
-        <View style={{ width: '66%', top: 10, left: 3 }}>
-          <AppTextInput
-            style={{
-              backgroundColor: '#f0f0f0',
-              borderRadius: 14,
-              paddingRight: 40,
-            }}
-            value={inputText}
-            onChangeText={setInputText}
-            placeholder="Type a message..."
-            placeholderTextColor="#999"
-            multiline
-            onFocus={() => setIsFocused(true)}
-            onBlur={() => setIsFocused(false)}
-            label={null}
-            error={null}
-          />
-          <TouchableOpacity
-            style={{
-              position: 'absolute',
-              right: 10,
-              top: 10,
-              backgroundColor: '#f0f0f0',
-            }}
-          >
-            <Feather name="file" size={24} color="#666" />
+        {/* INPUT BAR */}
+        <View style={styles.inputWrapper}>
+          <TouchableOpacity onPress={showImageOptions}>
+            <Entypo name="attachment" size={24} color="#000" />
           </TouchableOpacity>
-        </View>
 
-        <TouchableOpacity style={styles.actionButton}>
-          <Feather name="camera" size={24} color="#666" />
-        </TouchableOpacity>
-
-        {inputText.trim() ? (
-          <TouchableOpacity
-            style={[
-              styles.sendButton,
-              !inputText.trim() && styles.disabledSendButton,
-            ]}
-            onPress={handleSendMessage}
-            disabled={!inputText.trim()}
-          >
-            <Feather
-              name="send"
-              size={22}
-              color={inputText.trim() ? '#fff' : '#aaa'}
+          <View style={{ width: '66%', top: 10, left: 3 }}>
+            <AppTextInput
+              style={{
+                backgroundColor: '#f0f0f0',
+                borderRadius: 14,
+                paddingRight: 40,
+              }}
+              value={inputText}
+              onChangeText={setInputText}
+              placeholder="Type a message..."
+              placeholderTextColor="#999"
+              multiline
+              onFocus={() => setIsFocused(true)}
+              onBlur={() => setIsFocused(false)}
+              label={null}
+              error={null}
             />
+            <TouchableOpacity
+              style={{
+                position: 'absolute',
+                right: 10,
+                top: 10,
+                backgroundColor: '#f0f0f0',
+              }}
+            >
+              <Feather name="file" size={24} color="#666" />
+            </TouchableOpacity>
+          </View>
+
+          <TouchableOpacity
+            style={styles.actionButton}
+            onPress={captureImageFromCamera}
+          >
+            <Feather name="camera" size={24} color="#666" />
           </TouchableOpacity>
-        ) : (
-          <TouchableOpacity style={styles.actionButton}>
-            <MaterialIcons name="keyboard-voice" size={24} color="#666" />
-          </TouchableOpacity>
-        )}
-      </View>
-    </KeyboardAvoidingView>
-        </SafeAreaView>
+
+          {inputText.trim() ? (
+            <TouchableOpacity
+              style={[
+                styles.sendButton,
+                !inputText.trim() && styles.disabledSendButton,
+              ]}
+              onPress={handleSendMessage}
+              disabled={!inputText.trim()}
+            >
+              <Feather
+                name="send"
+                size={22}
+                color={inputText.trim() ? '#fff' : '#aaa'}
+              />
+            </TouchableOpacity>
+          ) : (
+            <TouchableOpacity style={styles.actionButton}>
+              <MaterialIcons name="keyboard-voice" size={24} color="#666" />
+            </TouchableOpacity>
+          )}
+        </View>
+      </KeyboardAvoidingView>
+    </SafeAreaView>
   );
 };
 
