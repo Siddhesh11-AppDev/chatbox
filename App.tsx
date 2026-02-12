@@ -8,6 +8,7 @@ import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { AuthProvider } from './src/core/context/AuthContext';
 import Toast from 'react-native-toast-message';
 import CustomToast from './src/shared/components/CustomToast';
+import NotificationHandler from './src/shared/components/NotificationHandler';
 
 
 // Define the root stack parameter list
@@ -26,6 +27,7 @@ const App = () => {
             <Stack.Navigator screenOptions={{ headerShown: false }}>
               <Stack.Screen name="AppNav" component={AppNavigator} />
             </Stack.Navigator>
+            <NotificationHandler />
           </SafeAreaProvider>
         </NavigationContainer>
         <Toast config={{

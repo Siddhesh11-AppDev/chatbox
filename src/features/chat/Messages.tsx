@@ -8,7 +8,7 @@ import {
   TextInput,
   TouchableOpacity,
   View,
-  Alert
+  Alert,
 } from 'react-native';
 import React, { useEffect, useRef, useState } from 'react';
 import firestore, {
@@ -21,7 +21,7 @@ import firestore, {
   limit,
   startAfter,
   deleteDoc,
-  doc
+  doc,
 } from '@react-native-firebase/firestore';
 import Feather from 'react-native-vector-icons/Feather';
 import FontAwesome from 'react-native-vector-icons/FontAwesome';
@@ -31,9 +31,13 @@ import { Swipeable } from 'react-native-gesture-handler';
 import { useAuth } from '../../core/context/AuthContext';
 import { AppStackParamList } from '../../core/navigation/TabNavigator';
 import { chatService } from '../../core/services/chat.service';
-import { contactData } from '../../core/services/JsonData';
 import { getUserAvatar } from '../../shared/utils/avatarUtils';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import {
+  storiesService,
+  StoryUser,
+  Story,
+} from '../../core/services/stories.service';
 
 type MessagesNavigationProp = NativeStackNavigationProp<
   AppStackParamList,
@@ -57,17 +61,23 @@ const Messages = () => {
   const searchWidth = useRef(new Animated.Value(40)).current;
   const searchOpacity = useRef(new Animated.Value(0)).current;
   const navigation = useNavigation<MessagesNavigationProp>();
-  const { user } = useAuth();
+  const { user, userProfile } = useAuth(); // Changed from just 'user'
   const [users, setUsers] = useState<User[]>([]);
   const [conversationUsers, setConversationUsers] = useState<User[]>([]);
+  const [storyUsers, setStoryUsers] = useState<StoryUser[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [isSearchActive, setIsSearchActive] = useState(false);
   const [isSearching, setIsSearching] = useState(false); // New state for search mode
-  const [unreadCounts, setUnreadCounts] = useState<{ [key: string]: number }>({});
-  const [lastMessages, setLastMessages] = useState<{ [key: string]: string }>({});
+  const [unreadCounts, setUnreadCounts] = useState<{ [key: string]: number }>(
+    {},
+  );
+  const [lastMessages, setLastMessages] = useState<{ [key: string]: string }>(
+    {},
+  );
+  const [refreshing, setRefreshing] = useState(false);
 
   // Toggle search bar animation
-  const toggleSearchBar = () => {
+ const toggleSearchBar = () => {
     if (isSearchActive) {
       Animated.parallel([
         Animated.timing(searchWidth, {
@@ -101,43 +111,47 @@ const Messages = () => {
     setIsSearchActive(!isSearchActive);
   };
 
-// Function to check which users have conversations with current user
-const checkConversationUsers = async (userList: User[]) => {
-  if (!user) return;
-  
-  const usersWithConversations: User[] = [];
-  
-  for (const targetUser of userList) {
-    const chatId = chatService.getChatId(user.uid, targetUser.uid);
-    
-    try {
-      // Check if this conversation is marked as deleted for current user
-      const chatDocRef = doc(firestore(), 'chats', chatId);
-      const chatDoc = await chatDocRef.get();
-      
-      if (chatDoc.exists) {
-        const chatData = chatDoc.data();
-        
-        // If chat is not marked as deleted for current user, include in conversation list
-        if (!chatData?.deleted_for_users?.includes(user.uid)) {
-          // Also check if there are messages in this chat
-          const messagesRef = collection(firestore(), `chats/${chatId}/messages`);
-          const snapshot = await getDocs(messagesRef);
-          
-          if (!snapshot.empty) {
-            usersWithConversations.push(targetUser);
+  // Function to check which users have conversations with current user
+  const checkConversationUsers = async (userList: User[]) => {
+    if (!user) return;
+
+    const usersWithConversations: User[] = [];
+
+    for (const targetUser of userList) {
+      const chatId = chatService.getChatId(user.uid, targetUser.uid);
+
+      try {
+        // Check if this conversation is marked as deleted for current user
+        const chatDocRef = doc(firestore(), 'chats', chatId);
+        const chatDoc = await chatDocRef.get();
+
+        if (chatDoc.exists) {
+          const chatData = chatDoc.data();
+
+          // If chat is not marked as deleted for current user, include in conversation list
+          if (!chatData?.deleted_for_users?.includes(user.uid)) {
+            // Also check if there are messages in this chat
+            const messagesRef = collection(
+              firestore(),
+              `chats/${chatId}/messages`,
+            );
+            const snapshot = await getDocs(messagesRef);
+
+            if (!snapshot.empty) {
+              usersWithConversations.push(targetUser);
+            }
           }
         }
+      } catch (error) {
+        console.error(
+          `Error checking conversation for user ${targetUser.uid}:`,
+          error,
+        );
       }
-    } catch (error) {
-      console.error(`Error checking conversation for user ${targetUser.uid}:`, error);
     }
-  }
-  
-  setConversationUsers(usersWithConversations);
-};
 
-
+    setConversationUsers(usersWithConversations);
+  };
 
   useEffect(() => {
     if (!user) return;
@@ -149,12 +163,15 @@ const checkConversationUsers = async (userList: User[]) => {
       uid: userData.uid,
       name: userData.name || '',
       email: userData.email || '',
-      profile_image: userData.profile_image || getUserAvatar({
-        displayName: userData.name,
-        photoURL: userData.profile_image,
-      }),
+      profile_image:
+        userData.profile_image ||
+        getUserAvatar({
+          displayName: userData.name,
+          photoURL: userData.profile_image,
+        }),
       online: !!userData.online,
-      last_message: typeof userData.last_message === 'string' ? userData.last_message : '',
+      last_message:
+        typeof userData.last_message === 'string' ? userData.last_message : '',
       last_message_time: userData.last_message_time || null,
       unread_count: userData.unread_count || 0,
     });
@@ -204,8 +221,9 @@ const checkConversationUsers = async (userList: User[]) => {
     if (!user) return;
 
     // Use all users (not just conversationUsers) to detect when a deleted conversation gets new messages
-    const usersToCheck = conversationUsers.length > 0 ? conversationUsers : users;
-    
+    const usersToCheck =
+      conversationUsers.length > 0 ? conversationUsers : users;
+
     const unsubs: any[] = [];
 
     usersToCheck.forEach((u: User) => {
@@ -224,9 +242,11 @@ const checkConversationUsers = async (userList: User[]) => {
           ...prev,
           [u.uid]: count,
         }));
-        
+
         // Check if this user should be in conversation list but isn't
-        const isInConversationList = conversationUsers.some(convUser => convUser.uid === u.uid);
+        const isInConversationList = conversationUsers.some(
+          convUser => convUser.uid === u.uid,
+        );
         if (count > 0 && !isInConversationList) {
           // Refresh the conversation list since a new message arrived
           checkConversationUsers(users);
@@ -246,8 +266,9 @@ const checkConversationUsers = async (userList: User[]) => {
     if (!user) return;
 
     // Use all users (not just conversationUsers) to detect when a deleted conversation gets new messages
-    const usersToCheck = conversationUsers.length > 0 ? conversationUsers : users;
-    
+    const usersToCheck =
+      conversationUsers.length > 0 ? conversationUsers : users;
+
     const unsubs: any[] = [];
 
     usersToCheck.forEach((u: User) => {
@@ -264,9 +285,11 @@ const checkConversationUsers = async (userList: User[]) => {
             ...prev,
             [u.uid]: messageData.text || '',
           }));
-          
+
           // Check if this user should be in conversation list but isn't
-          const isInConversationList = conversationUsers.some(convUser => convUser.uid === u.uid);
+          const isInConversationList = conversationUsers.some(
+            convUser => convUser.uid === u.uid,
+          );
           if (!isInConversationList) {
             // Refresh the conversation list since a new message arrived
             checkConversationUsers(users);
@@ -287,78 +310,84 @@ const checkConversationUsers = async (userList: User[]) => {
     };
   }, [conversationUsers, user, users]);
 
+ 
 
+  // Delete conversation function - unilateral deletion for current user
+  // This removes all conversation data for the current user but keeps it for the other user
+  // When starting a new conversation later, it will be fresh and empty
+  const deleteConversation = async (targetUser: User) => {
+    if (!user) return;
 
-// Delete conversation function - unilateral deletion for current user
-// This removes all conversation data for the current user but keeps it for the other user
-// When starting a new conversation later, it will be fresh and empty
-const deleteConversation = async (targetUser: User) => {
-  if (!user) return;
-
-  Alert.alert(
-    'Delete Conversation',
-    `Are you sure you want to delete your conversation with ${targetUser.name}? This will remove all messages locally.`,
-    [
-      {
-        text: 'Cancel',
-        style: 'cancel',
-      },
-      {
-        text: 'Delete',
-        style: 'destructive',
-        onPress: async () => {
-          try {
-            const chatId = chatService.getChatId(user.uid, targetUser.uid);
-            
-            // Delete all messages in the conversation for current user
-            const messagesRef = collection(firestore(), `chats/${chatId}/messages`);
-            const messagesSnapshot = await getDocs(messagesRef);
-            
-            // Delete each message document in a batch operation
-            const batch = firestore().batch();
-            messagesSnapshot.forEach((doc) => {
-              batch.delete(doc.ref);
-            });
-            
-            // Update the chat document to track that current user has deleted this conversation
-            // This allows for a fresh start when creating a new conversation
-            const chatDocRef = doc(firestore(), 'chats', chatId);
-            await chatDocRef.update({
-              deleted_for_users: firestore.FieldValue.arrayUnion(user.uid)
-            });
-            
-            await batch.commit();
-            
-            // Update local state to remove the user from conversation list
-            setConversationUsers(prev => prev.filter(u => u.uid !== targetUser.uid));
-            
-            // Clear related state
-            setUnreadCounts(prev => {
-              const newCounts = { ...prev };
-              delete newCounts[targetUser.uid];
-              return newCounts;
-            });
-            
-            setLastMessages(prev => {
-              const newMessages = { ...prev };
-              delete newMessages[targetUser.uid];
-              return newMessages;
-            });
-            
-            console.log(`Conversation with ${targetUser.name} deleted for current user`);
-          } catch (error) {
-            console.error('Error deleting conversation:', error);
-            Alert.alert('Error', 'Failed to delete conversation. Please try again.');
-          }
+    Alert.alert(
+      'Delete Conversation',
+      `Are you sure you want to delete your conversation with ${targetUser.name}? This will remove all messages locally.`,
+      [
+        {
+          text: 'Cancel',
+          style: 'cancel',
         },
-      },
-    ]
-  );
-};
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              const chatId = chatService.getChatId(user.uid, targetUser.uid);
 
+              // Delete all messages in the conversation for current user
+              const messagesRef = collection(
+                firestore(),
+                `chats/${chatId}/messages`,
+              );
+              const messagesSnapshot = await getDocs(messagesRef);
 
+              // Delete each message document in a batch operation
+              const batch = firestore().batch();
+              messagesSnapshot.forEach((doc: any) => {
+                batch.delete(doc.ref);
+              });
 
+              // Update the chat document to track that current user has deleted this conversation
+              // This allows for a fresh start when creating a new conversation
+              const chatDocRef = doc(firestore(), 'chats', chatId);
+              await chatDocRef.update({
+                deleted_for_users: firestore.FieldValue.arrayUnion(user.uid),
+              });
 
+              await batch.commit();
+
+              // Update local state to remove the user from conversation list
+              setConversationUsers(prev =>
+                prev.filter(u => u.uid !== targetUser.uid),
+              );
+
+              // Clear related state
+              setUnreadCounts(prev => {
+                const newCounts = { ...prev };
+                delete newCounts[targetUser.uid];
+                return newCounts;
+              });
+
+              setLastMessages(prev => {
+                const newMessages = { ...prev };
+                delete newMessages[targetUser.uid];
+                return newMessages;
+              });
+
+              console.log(
+                `Conversation with ${targetUser.name} deleted for current user`,
+              );
+            } catch (error) {
+              console.error('Error deleting conversation:', error);
+              Alert.alert(
+                'Error',
+                'Failed to delete conversation. Please try again.',
+              );
+            }
+          },
+        },
+      ],
+    );
+  };
 
   const getUnreadCount = (userId: string) => {
     return unreadCounts[userId] || 0;
@@ -378,7 +407,10 @@ const deleteConversation = async (targetUser: User) => {
       <TouchableOpacity style={styles.muteButton}>
         <Feather name="bell" size={22} color="#FFF" />
       </TouchableOpacity>
-      <TouchableOpacity style={styles.deleteButton}  onPress={() => deleteConversation(item)}>
+      <TouchableOpacity
+        style={styles.deleteButton}
+        onPress={() => deleteConversation(item)}
+      >
         <Feather name="trash-2" size={22} color="#FFF" />
       </TouchableOpacity>
     </View>
@@ -387,20 +419,20 @@ const deleteConversation = async (targetUser: User) => {
   // Sort users to show those with unread messages at the top
   const getSortedUsers = () => {
     const baseUsers = isSearching ? users : conversationUsers;
-    
+
     return [...baseUsers].sort((a, b) => {
       const aUnread = getUnreadCount(a.uid);
       const bUnread = getUnreadCount(b.uid);
-      
+
       // Users with unread messages come first
       if (aUnread > 0 && bUnread === 0) return -1;
       if (bUnread > 0 && aUnread === 0) return 1;
-      
+
       // Both have unread messages - sort by count (higher first)
       if (aUnread > 0 && bUnread > 0) {
         return bUnread - aUnread;
       }
-      
+
       // No unread messages - sort alphabetically
       return a.name.localeCompare(b.name);
     });
@@ -419,12 +451,194 @@ const deleteConversation = async (targetUser: User) => {
     });
   };
 
+  const [myStories, setMyStories] = useState<any[]>([]);
+
+  // Load your own stories with real-time updates
+  useEffect(() => {
+    if (!user) return;
+
+    // Set up real-time listener for user's own stories
+    const storiesRef = firestore()
+      .collection('stories')
+      .where('userId', '==', user.uid);
+
+    const unsubscribe = onSnapshot(storiesRef, async (snapshot) => {
+      const stories: any[] = [];
+      const now = Date.now();
+      const twentyFourHours = 24 * 60 * 60 * 1000;
+
+      snapshot.forEach((doc: any) => {
+        const story = {
+          id: doc.id,
+          ...doc.data(),
+        };
+
+        // Check if story is expired (older than 24 hours)
+        const storyTimestamp = story.timestamp;
+        if (storyTimestamp) {
+          const storyTime = storyTimestamp.toDate().getTime();
+          
+          if ((now - storyTime) <= twentyFourHours) {
+            stories.push(story);
+          }
+        }
+      });
+
+      // Sort stories by timestamp (newest first)
+      stories.sort((a, b) => b.timestamp.toMillis() - a.timestamp.toMillis());
+      setMyStories(stories);
+    });
+
+    // Cleanup function
+    return () => {
+      if (unsubscribe) {
+        unsubscribe();
+      }
+    };
+  }, [user]);
+
+  const handleAddStory = () => {
+    // Check if user already has stories
+    const hasExistingStories = myStories.length > 0;
+
+    if (hasExistingStories) {
+      // If user has existing stories, show them in story viewer
+      const myStoryUser: StoryUser = {
+        userId: user!.uid,
+        userName: user!.name || 'You',
+        userAvatar: user!.profile_image || '',
+        stories: myStories,
+        hasUnviewed: false, // For own stories, we don't track if they've been viewed
+      };
+
+      // Filter out the current user from storyUsers to avoid duplicates
+      const otherUsersStories = storyUsers.filter(storyUser => storyUser.userId !== user!.uid);
+
+      navigation.navigate('StoryViewer' as any, {
+        storyUsers: [myStoryUser, ...otherUsersStories],
+        initialIndex: 0,
+      });
+    } else {
+      // If no existing stories, go to creator
+      navigation.navigate('StoryCreator' as any);
+    }
+  };
+
+  const handleStoryPress = (stories: StoryUser[], index: number) => {
+    console.log('=== HANDLE STORY PRESS DEBUG ===');
+    console.log('Stories being passed:', stories);
+    console.log('Stories count:', stories.length);
+    if (stories.length > 0) {
+      console.log('First story user:', stories[0]);
+      console.log('First story user stories count:', stories[0].stories?.length || 0);
+    }
+    console.log('Initial index:', index);
+    console.log('================================');
+    
+    navigation.navigate('StoryViewer' as any, {
+      storyUsers: stories,
+      initialIndex: index,
+    });
+  };
+
   // Function to manually refresh conversation list
   const refreshConversationList = async () => {
     if (user && users.length > 0) {
       await checkConversationUsers(users);
     }
   };
+
+  // Function to handle pull-to-refresh
+  const onRefresh = async () => {
+    setRefreshing(true);
+
+    try {
+      // Refetch users and conversations
+      const usersRef = collection(firestore(), 'users');
+      const q = query(usersRef, where('uid', '!=', user?.uid));
+
+      const snapshot = await getDocs(q);
+      const userList: User[] = [];
+      snapshot.forEach((doc: any) => {
+        userList.push({
+          uid: doc.data().uid,
+          name: doc.data().name || '',
+          email: doc.data().email || '',
+          profile_image:
+            doc.data().profile_image ||
+            getUserAvatar({
+              displayName: doc.data().name,
+              photoURL: doc.data().profile_image,
+            }),
+          online: !!doc.data().online,
+          last_message:
+            typeof doc.data().last_message === 'string'
+              ? doc.data().last_message
+              : '',
+          last_message_time: doc.data().last_message_time || null,
+          unread_count: doc.data().unread_count || 0,
+        });
+      });
+
+      setUsers(userList);
+      await checkConversationUsers(userList);
+    } catch (error) {
+      console.error('Error refreshing data:', error);
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
+
+ // Listen to stories
+  useEffect(() => {
+    if (!userProfile) return; // Changed from !user
+
+    console.log('=== STORIES SETUP DEBUG ===');
+    console.log('Current user ID:', userProfile.uid);
+    console.log('Current user name:', userProfile.name);
+    console.log('==========================');
+
+    console.log('Setting up stories listener for user:', userProfile.uid); // Changed from user.uid
+    const unsubscribe = storiesService.listenToStories(
+      userProfile.uid, // Changed from user.uid
+      (stories: StoryUser[]) => {
+        console.log('=== STORIES CALLBACK DEBUG ===');
+        console.log('Received stories array:', stories);
+        console.log('Stories count:', stories.length);
+        stories.forEach((storyUser, index) => {
+          console.log(`Story ${index}:`, {
+            userId: storyUser.userId,
+            userName: storyUser.userName,
+            storiesCount: storyUser.stories.length,
+            hasUnviewed: storyUser.hasUnviewed
+          });
+        });
+        console.log('=============================');
+        setStoryUsers(stories);
+      },
+    );
+
+    return () => unsubscribe();
+  }, [userProfile]); // Changed from [user]
+
+  // Update other useEffects to use userProfile
+  useEffect(() => {
+    if (!userProfile) return; // Changed from !user
+    // ... rest of the effect code remains the same but uses userProfile instead of user
+  }, [userProfile]);
+
+  // Load your own stories
+  useEffect(() => {
+    if (!user) return;
+
+    const loadMyStories = async () => {
+      const stories = await storiesService.getMyStories(user.uid);
+      setMyStories(stories);
+    };
+
+    loadMyStories();
+  }, [user]);
 
   const ListHeader = () => (
     <>
@@ -434,7 +648,7 @@ const deleteConversation = async (targetUser: User) => {
         >
           <TouchableOpacity style={styles.searchIcon} onPress={toggleSearchBar}>
             <Animated.View style={{ opacity: isSearchActive ? 1 : 1 }}>
-              <Feather name="search" size={22} color="#000"  />
+              <Feather name="search" size={22} color="#000" />
             </Animated.View>
           </TouchableOpacity>
 
@@ -479,28 +693,123 @@ const deleteConversation = async (targetUser: User) => {
 
       <View style={styles.storiesContainer}>
         <FlatList
-          data={contactData}
+          data={[ 
+            { id: 'yours', isYourStory: true },
+            // Show ALL story users including yourself (but handle duplicates in UI)
+            ...storyUsers.map(storyUser => ({
+              ...storyUser,
+              isYourStory: false,
+            })),
+          ]}
           horizontal
-          keyExtractor={item => item._id}
+          keyExtractor={(item, index) => item.id || item.userId || `index-${index}`}
           showsHorizontalScrollIndicator={false}
-          renderItem={({ item }) => (
-            <View style={styles.storyItem}>
-              <View style={styles.storyRing}>
-                <Image
-                  source={{
-                    uri: item.profile_image || getUserAvatar({
-                      displayName: item.name,
-                      photoURL: item.profile_image,
-                    }),
-                  }}
-                  style={styles.storyImage}
-                />
-              </View>
-              <Text style={styles.storyName} numberOfLines={1}>
-                {item.name}
+          renderItem={({ item, index }) => {
+            console.log(`Rendering item ${index}:`, item);
+            
+            // "Your Story" section
+            if (item.isYourStory) {
+              const hasActiveStories = myStories.length > 0; // Use myStories state instead of checking storyUsers
+
+              console.log('Rendering YOUR STORY section, hasActiveStories:', hasActiveStories);
+
+              return (
+                <TouchableOpacity
+                  style={styles.yourStoryContainer}
+                  onPress={handleAddStory}
+                >
+                  <View
+                    style={[
+                      styles.yourStoryRing,
+                      hasActiveStories && styles.activeYourStoryRing,
+                    ]}
+                  >
+                    <View style={styles.yourStoryAvatar}>
+                      {hasActiveStories ? (
+                        <Image
+                          source={{ uri: userProfile?.profile_image }}
+                          style={styles.storyImage}
+                        />
+                      ) : (
+                        <Feather name="plus" size={20} color="#FFF" />
+                      )}
+                    </View>
+                  </View>
+                  <Text style={styles.storyName} numberOfLines={1}>
+                    {hasActiveStories ? 'Your Story' : 'Add Story'}
+                  </Text>
+                </TouchableOpacity>
+              );
+            }
+
+            // Other users' stories (including yourself if you have stories)
+            const storyUser = item as StoryUser;
+            
+            // Skip rendering your own stories in the main list to avoid duplicates
+            if (storyUser.userId === userProfile?.uid) {
+              return null; // Don't render your own stories here
+            }
+
+            console.log('Rendering OTHER USER story:', storyUser.userName);
+            
+            return (
+              <TouchableOpacity
+                style={styles.storyItem}
+                onPress={() => {
+                  // When clicking on other users, show only their stories
+                  console.log('Clicked on story user:', storyUser);
+                  console.log('Stories count:', storyUser.stories?.length || 0);
+                  console.log('Stories data:', storyUser.stories);
+                  
+                  // Validate that we have stories before navigating
+                  if (!storyUser.stories || storyUser.stories.length === 0) {
+                    console.log('No stories found for this user, skipping navigation');
+                    Alert.alert('No Stories', `${storyUser.userName} doesn't have any stories right now.`);
+                    return;
+                  }
+                  
+                  handleStoryPress([storyUser], 0);
+                }}
+              >
+                <View
+                  style={[
+                    styles.storyRing,
+                    storyUser.hasUnviewed && styles.unviewedStoryRing,
+                  ]}
+                >
+                  <Image
+                    source={{
+                      uri:
+                        storyUser.userAvatar ||
+                        'https://ui-avatars.com/api/?userName=' +
+                          encodeURIComponent(storyUser.userName),
+                    }}
+                    style={styles.storyImage}
+                    onError={(error) => console.log('Image load error:', error)}
+                  />
+                </View>
+                <Text style={styles.storyName} numberOfLines={1}>
+                  {storyUser.userName}
+                </Text>
+              </TouchableOpacity>
+            );
+          }}
+          ListEmptyComponent={() => (
+            <View style={{ 
+              padding: 20, 
+              backgroundColor: '#333', 
+              margin: 10,
+              borderRadius: 10,
+              minWidth: 200,
+              justifyContent: 'center',
+              alignItems: 'center'
+            }}>
+              <Text style={{ color: '#FFF', textAlign: 'center' }}>
+                No friend stories yet
               </Text>
             </View>
           )}
+          extraData={storyUsers}
         />
       </View>
 
@@ -522,6 +831,8 @@ const deleteConversation = async (targetUser: User) => {
           [{ nativeEvent: { contentOffset: { y: scrollY } } }],
           { useNativeDriver: true },
         )}
+        onRefresh={onRefresh}
+        refreshing={refreshing}
         renderItem={({ item }) => (
           <Swipeable renderRightActions={() => renderRightActions(item)}>
             <TouchableOpacity
@@ -538,14 +849,18 @@ const deleteConversation = async (targetUser: User) => {
               <View style={styles.messageContent}>
                 <Text style={styles.contactName}>{item.name}</Text>
                 <Text style={styles.lastMessage} numberOfLines={1}>
-                  {getLastMessage(item.uid)?.startsWith('image:') ? 'IMG' : getLastMessage(item.uid) || 'Tap to start chatting'}
+                  {getLastMessage(item.uid)?.startsWith('image:')
+                    ? 'IMG'
+                    : getLastMessage(item.uid) || 'Tap to start chatting'}
                 </Text>
               </View>
 
               {getUnreadCount(item.uid) > 0 && (
                 <View style={styles.unreadBadge}>
                   <Text style={styles.unreadCount}>
-                    {getUnreadCount(item.uid) > 9 ? '9+' : getUnreadCount(item.uid)}
+                    {getUnreadCount(item.uid) > 9
+                      ? '9+'
+                      : getUnreadCount(item.uid)}
                   </Text>
                 </View>
               )}
@@ -555,20 +870,17 @@ const deleteConversation = async (targetUser: User) => {
         ListEmptyComponent={() => (
           <View style={styles.emptyListContainer}>
             <View style={styles.emptyUserIcon}>
-              <Feather 
-                name={isSearching ? "user" : "message-square"} 
-                size={60} 
-                color="#9E9E9E" 
+              <Feather
+                name={isSearching ? 'user' : 'message-square'}
+                size={60}
+                color="#9E9E9E"
               />
             </View>
             <Text style={styles.emptyTitle}>
-              {isSearching ? "User Not Available" : "No Conversations Yet"}
+              {isSearching ? 'User Not Available' : 'No Conversations Yet'}
             </Text>
             <Text style={styles.emptySubtitle}>
-              {isSearching 
-                ? "Find User By Search" 
-                : "Find User By Search"
-              }
+              {isSearching ? 'Find User By Search' : 'Find User By Search'}
             </Text>
           </View>
         )}
@@ -576,7 +888,6 @@ const deleteConversation = async (targetUser: User) => {
     </SafeAreaView>
   );
 };
-
 
 export default Messages;
 
@@ -633,6 +944,7 @@ const styles = StyleSheet.create({
     paddingLeft: 10,
     backgroundColor: '#000',
     borderBottomLeftRadius: -50,
+    position: 'relative',
   },
   storyItem: {
     alignItems: 'center',
@@ -785,4 +1097,49 @@ const styles = StyleSheet.create({
     color: '#777',
     textAlign: 'center',
   },
+  yourStoryContainer: {
+    alignItems: 'center',
+    marginHorizontal: 8,
+  },
+  yourStoryRing: {
+    borderWidth: 3,
+    borderColor: '#9E9E9E',
+    borderRadius: 40,
+    padding: 3,
+  },
+  activeYourStoryRing: {
+    borderColor: '#4CAF50',
+  },
+  yourStoryAvatar: {
+    width: 60,
+    height: 60,
+    borderRadius: 30,
+    backgroundColor: '#333',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  unviewedStoryRing: {
+    borderColor: '#4CAF50',
+  },
+  addStoryButton: {
+    position: 'absolute',
+    bottom: 10,
+    right: 20,
+    backgroundColor: '#4CAF50',
+    borderRadius: 20,
+    paddingHorizontal: 15,
+    paddingVertical: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+    zIndex: 1,
+  },
+  addStoryButtonText: {
+    color: '#FFF',
+    fontSize: 14,
+    fontWeight: '600',
+    marginLeft: 5,
+  },
 });
+
+
+

@@ -237,12 +237,12 @@ const UserMessage = ({ route }: Props) => {
   const showImageOptions = () => {
     Alert.alert(
       'Send Image',
-      'How would you like to add an image?',
+      ' would you like to add an image?',
       [
-        {
-          text: 'Camera',
-          onPress: captureImageFromCamera,
-        },
+        // {
+        //   text: 'Camera',
+        //   onPress: captureImageFromCamera,
+        // },
         {
           text: 'Gallery',
           onPress: selectImageFromGallery,

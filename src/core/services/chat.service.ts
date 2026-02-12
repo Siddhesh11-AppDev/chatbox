@@ -4,13 +4,14 @@
 // src/firebase/chat.service.ts
 import firestore from '@react-native-firebase/firestore';
 import { COLLECTIONS } from './collection';
+import { notificationService } from './notification.service';
 
 interface Message {
   id?: string;
   senderId: string;
   receiverId: string;
   text: string;
-  timestamp: FirebaseFirestoreTypes.Timestamp | any;
+  timestamp: any;
   read: boolean;
 }
 
@@ -18,7 +19,7 @@ interface Chat {
   id: string;
   participants: string[];
   lastMessage?: string;
-  lastMessageTime?: FirebaseFirestoreTypes.Timestamp | any;
+  lastMessageTime?: any;
 }
 
 class ChatService {
@@ -82,6 +83,29 @@ class ChatService {
           },
           { merge: true },
         );
+
+      // Send push notification to receiver
+      try {
+        // Get sender's name for notification
+        const senderDoc = await this.firestore.collection('users').doc(senderId).get();
+        const senderName = senderDoc.exists ? senderDoc.data()?.name || 'Someone' : 'Someone';
+        
+        // Send notification
+        await notificationService.sendNotificationToUser(receiverId, {
+          title: 'New Message',
+          body: `${senderName}: ${text.substring(0, 50)}${text.length > 50 ? '...' : ''}`,
+          data: {
+            type: 'chat',
+            senderId: senderId,
+            receiverId: receiverId,
+            chatId: chatId,
+            messageId: messageDoc.id,
+          }
+        });
+      } catch (notificationError) {
+        console.error('Error sending notification:', notificationError);
+        // Don't throw error if notification fails, just log it
+      }
 
       return messageDoc.id;
     } catch (error) {
