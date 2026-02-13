@@ -1,5 +1,3 @@
-
-
 import { StyleSheet } from 'react-native';
 import React from 'react';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
@@ -13,6 +11,7 @@ import UserProfile from '../../features/user/UserProfile';
 import VideoCall from '../../features/chat/VideoCall';
 import StoryViewer from '../../features/stories/StoryViewer';
 import StoryCreator from '../../features/stories/StoryCreator';
+import IncomingCallScreen from '../../features/chat/IncomingCallScreen';
 
 export type AppStackParamList = {
   Splash: undefined;
@@ -22,8 +21,13 @@ export type AppStackParamList = {
   userMsg: { userData: any };
   userProfile: { userData: any };
   videoCall: { userData: any };
-  StoryViewer: { storyUsers: import('../services/stories.service').StoryUser[]; initialIndex: number };
+  StoryViewer: {
+    storyUsers: import('../services/stories.service').StoryUser[];
+    initialIndex: number;
+  };
   StoryCreator: undefined;
+  IncomingCall: undefined;
+  Settings: undefined;
 };
 
 const Stack = createNativeStackNavigator<AppStackParamList>();
@@ -46,9 +50,32 @@ const AppNavigator = () => {
           <Stack.Screen name="Tab" component={TabNavigator} />
           <Stack.Screen name="userMsg" component={UserMessage} />
           <Stack.Screen name="userProfile" component={UserProfile} />
-          <Stack.Screen name="videoCall" component={VideoCall} />
-          <Stack.Screen name="StoryViewer" component={StoryViewer} options={{ headerShown: false }} />
-          <Stack.Screen name="StoryCreator" component={StoryCreator} options={{ headerShown: false }} />
+          <Stack.Screen
+            name="videoCall"
+            component={VideoCall}
+            options={{
+              presentation: 'fullScreenModal',
+              gestureEnabled: false,
+            }}
+          />
+          <Stack.Screen
+            name="IncomingCall"
+            component={IncomingCallScreen}
+            options={{
+              presentation: 'fullScreenModal',
+              gestureEnabled: false,
+            }}
+          />
+          <Stack.Screen
+            name="StoryViewer"
+            component={StoryViewer}
+            options={{ headerShown: false }}
+          />
+          <Stack.Screen
+            name="StoryCreator"
+            component={StoryCreator}
+            options={{ headerShown: false }}
+          />
         </>
       ) : (
         <>

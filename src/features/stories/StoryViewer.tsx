@@ -425,19 +425,25 @@ const StoryViewer = () => {
         {/* Debug logging */}
         {console.log('Rendering image with mediaUrl:', currentStory.mediaUrl)}
 
-        {/* Handle image display - same approach as UserMessage */}
-        <Image
-          source={{ uri: currentStory.mediaUrl }}
-          style={styles.storyImage}
-          resizeMode="cover"
-          onError={error => {
-            console.log('Image load error:', error.nativeEvent.error);
-            console.log('Failed URI:', currentStory.mediaUrl);
-          }}
-          onLoad={() => {
-            console.log('Image loaded successfully');
-          }}
-        />
+        {/* Handle image display - using Base64 from mediaData */}
+        {currentStory.mediaData ? (
+          <Image
+            source={{ uri: `data:image/jpeg;base64,${currentStory.mediaData}` }}
+            style={styles.storyImage}
+            resizeMode="cover"
+            onError={error => {
+              console.log('Image load error:', error.nativeEvent.error);
+              console.log('Failed to load Base64 image');
+            }}
+            onLoad={() => {
+              console.log('Base64 image loaded successfully');
+            }}
+          />
+        ) : (
+          <View style={styles.storyImage}>
+            <Text style={{ color: '#FFF' }}>Loading image...</Text>
+          </View>
+        )}
 
         {/* Left touch area */}
         <TouchableOpacity
@@ -460,7 +466,7 @@ const StoryViewer = () => {
           <Text style={styles.caption}>{currentStory.caption}</Text>
         </View>
       )}
-      {currentStory.viewers && (
+      {currentStoryUser.userId === userProfile?.uid && (
         <View style={styles.ViewsContainer}>
             <Feather name="eye" size={24} color="#FFF" />
           <Text style={styles.caption}>{currentStory.viewers.length}</Text>
@@ -543,8 +549,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     backgroundColor: '#000', // Black background for better contrast
   },
-  // ... existing code ...
-
   storyImage: {
     width: width,
     flex: 1,

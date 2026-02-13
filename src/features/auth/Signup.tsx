@@ -160,7 +160,7 @@ const Signup = () => {
   };
 
   return (
-    <SafeAreaView  style={{ flex: 1, backgroundColor: '#FFF' }}>
+    <SafeAreaView style={{ flex: 1, backgroundColor: '#FFF' }} edges={['top', 'bottom']}>
 
    
     <KeyboardAvoidingView

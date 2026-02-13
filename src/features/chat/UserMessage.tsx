@@ -27,6 +27,7 @@ import firestore, {
   getDocs,
   query,
   where,
+  FieldValue
 } from '@react-native-firebase/firestore';
 import { getUserAvatar } from '../../shared/utils/avatarUtils';
 import {
@@ -44,6 +45,8 @@ interface Message {
   text: string;
   timestamp: any;
   read: boolean;
+  type?: 'text' | 'image';
+  imageData?: string; // Base64 image data
 }
 
 const UserMessage = ({ route }: Props) => {
@@ -55,6 +58,7 @@ const UserMessage = ({ route }: Props) => {
   const [inputText, setInputText] = useState('');
   const [isFocused, setIsFocused] = useState(false);
   const [hasCameraPermission, setHasCameraPermission] = useState(false);
+  const [isSendingImage, setIsSendingImage] = useState(false); // Track image sending state
 
   const flatListRef = useRef<FlatList>(null);
 
@@ -117,24 +121,24 @@ const UserMessage = ({ route }: Props) => {
       const messageText = inputText.trim();
       setInputText('');
       setIsFocused(false);
-      
+
       // Get the chat ID before sending the message
       const chatId = chatService.getChatId(user.uid, userData.uid);
-      
+
       // Remove current user from deleted_for_users array to "undelete" the conversation
       const chatDocRef = firestore().doc(`chats/${chatId}`);
       const chatDoc = await chatDocRef.get();
-      
+
       if (chatDoc.exists) {
         const chatData = chatDoc.data();
         if (chatData?.deleted_for_users?.includes(user.uid)) {
           // Remove current user from the deleted array
           await chatDocRef.update({
-            deleted_for_users: firestore.FieldValue.arrayRemove(user.uid)
+            deleted_for_users: firestore.FieldValue.arrayRemove(user.uid),
           });
         }
       }
-      
+
       // Send the message after potentially "undeleting" the conversation
       await chatService.sendMessage(user.uid, userData.uid, messageText);
       setTimeout(() => {
@@ -146,37 +150,43 @@ const UserMessage = ({ route }: Props) => {
   };
 
   const handleSendImage = async (imageUri: string) => {
-    if (!user) return;
+    if (!user || isSendingImage) return;
 
     try {
+      setIsSendingImage(true);
+
       // Get the chat ID before sending the message
       const chatId = chatService.getChatId(user.uid, userData.uid);
-      
+
       // Remove current user from deleted_for_users array to "undelete" the conversation
       const chatDocRef = firestore().doc(`chats/${chatId}`);
       const chatDoc = await chatDocRef.get();
-      
+
       if (chatDoc.exists) {
         const chatData = chatDoc.data();
         if (chatData?.deleted_for_users?.includes(user.uid)) {
           // Remove current user from the deleted array
           await chatDocRef.update({
-            deleted_for_users: firestore.FieldValue.arrayRemove(user.uid)
+            deleted_for_users: firestore.FieldValue.arrayRemove(user.uid),
           });
         }
       }
-      
+
       // Send the image message after potentially "undeleting" the conversation
       await chatService.sendMessage(
         user.uid,
         userData.uid,
-        `image:${imageUri}`,
+        'Image', // Placeholder text
+        imageUri, // Pass the image URI for base64 conversion
       );
       setTimeout(() => {
         flatListRef.current?.scrollToEnd({ animated: true });
       }, 100);
     } catch (error) {
-      Alert.alert('Error', 'Failed to send image');
+      console.error('Error sending image:', error);
+      Alert.alert('Error', 'Failed to send image: ' + (error as Error).message);
+    } finally {
+      setIsSendingImage(false);
     }
   };
 
@@ -235,9 +245,14 @@ const UserMessage = ({ route }: Props) => {
   };
 
   const showImageOptions = () => {
+    if (isSendingImage) {
+      Alert.alert('Please wait', 'Image is being uploaded...');
+      return;
+    }
+
     Alert.alert(
       'Send Image',
-      ' would you like to add an image?',
+      'Would you like to add an image?',
       [
         // {
         //   text: 'Camera',
@@ -368,9 +383,9 @@ const UserMessage = ({ route }: Props) => {
         formatDate(messages[index - 1].timestamp) !==
           formatDate(item.timestamp));
 
-    // Check if message is an image (starts with 'image:' prefix)
-    const isImageMessage = item.text.startsWith('image:');
-    const messageText = isImageMessage ? item.text.substring(6) : item.text; // Remove 'image:' prefix
+    // Check if message is an image (using type field and imageData)
+    const isImageMessage = item.type === 'image' && item.imageData;
+    const messageText = isImageMessage ? item.imageData : item.text;
 
     return (
       <View>
@@ -408,7 +423,7 @@ const UserMessage = ({ route }: Props) => {
             >
               {isImageMessage ? (
                 <Image
-                  source={{ uri: messageText }}
+                  source={{ uri: `data:image/jpeg;base64,${messageText}` }}
                   style={styles.imageMessage}
                   onError={error => console.log('Image load error:', error)}
                   onLoad={success => console.log('Image loaded successfully')}
@@ -443,7 +458,7 @@ const UserMessage = ({ route }: Props) => {
   };
 
   return (
-    <SafeAreaView style={styles.container}>
+    <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
       <KeyboardAvoidingView
         style={{ flex: 1 }}
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
@@ -515,8 +530,15 @@ const UserMessage = ({ route }: Props) => {
 
         {/* INPUT BAR */}
         <View style={styles.inputWrapper}>
-          <TouchableOpacity onPress={showImageOptions}>
-            <Entypo name="attachment" size={24} color="#000" />
+          <TouchableOpacity
+            onPress={showImageOptions}
+            disabled={isSendingImage}
+          >
+            <Entypo
+              name="attachment"
+              size={24}
+              color={isSendingImage ? '#ccc' : '#000'}
+            />
           </TouchableOpacity>
 
           <View style={{ width: '66%', top: 10, left: 3 }}>
@@ -551,8 +573,13 @@ const UserMessage = ({ route }: Props) => {
           <TouchableOpacity
             style={styles.actionButton}
             onPress={captureImageFromCamera}
+            disabled={isSendingImage}
           >
-            <Feather name="camera" size={24} color="#666" />
+            <Feather
+              name="camera"
+              size={24}
+              color={isSendingImage ? '#ccc' : '#666'}
+            />
           </TouchableOpacity>
 
           {inputText.trim() ? (
@@ -571,8 +598,15 @@ const UserMessage = ({ route }: Props) => {
               />
             </TouchableOpacity>
           ) : (
-            <TouchableOpacity style={styles.actionButton}>
-              <MaterialIcons name="keyboard-voice" size={24} color="#666" />
+            <TouchableOpacity
+              style={styles.actionButton}
+              disabled={isSendingImage}
+            >
+              <MaterialIcons
+                name="keyboard-voice"
+                size={24}
+                color={isSendingImage ? '#ccc' : '#666'}
+              />
             </TouchableOpacity>
           )}
         </View>
@@ -704,7 +738,7 @@ const styles = StyleSheet.create({
     minWidth: 60,
   },
   leftBubble: {
-    backgroundColor: '#FFFFFF',
+    backgroundColor: '#eee',
     borderBottomLeftRadius: 4,
     elevation: 1,
   },

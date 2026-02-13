@@ -1,24 +1,33 @@
-import messaging from '@react-native-firebase/messaging';
-import { Platform } from 'react-native';
-import firestore from '@react-native-firebase/firestore';
+import messaging, { FirebaseMessagingTypes } from '@react-native-firebase/messaging';
+import { Platform, Alert, Vibration } from 'react-native';
+import { NavigationContainerRef } from '@react-navigation/native';
+import firestore, { serverTimestamp } from '@react-native-firebase/firestore';
 
 class NotificationService {
-  // Request permission for iOS and Android
-  async requestPermission() {
-    try {
-      if (Platform.OS === 'ios') {
-        const authStatus = await messaging().requestPermission();
-        const enabled =
-          authStatus === messaging.AuthorizationStatus.AUTHORIZED ||
-          authStatus === messaging.AuthorizationStatus.PROVISIONAL;
+  private navigationRef: NavigationContainerRef | null = null;
+  private foregroundMessageListener: (() => void) | null = null;
 
-        console.log('iOS notification permission status:', authStatus);
-        return enabled;
-      } else {
-        // Android automatically grants permission for notifications
-        await messaging().requestPermission();
-        console.log('Android notification permission granted');
+  constructor() {
+    // Don't call async methods in constructor
+  }
+
+  setNavigationRef(ref: NavigationContainerRef) {
+    this.navigationRef = ref;
+  }
+
+  async requestPermission(): Promise<boolean> {
+    try {
+      const authStatus = await messaging().requestPermission();
+      const enabled =
+        authStatus === messaging.AuthorizationStatus.AUTHORIZED ||
+        authStatus === messaging.AuthorizationStatus.PROVISIONAL;
+
+      if (enabled) {
+        console.log('Notification permission authorized');
         return true;
+      } else {
+        console.log('Notification permission denied');
+        return false;
       }
     } catch (error) {
       console.error('Error requesting notification permission:', error);
@@ -26,8 +35,7 @@ class NotificationService {
     }
   }
 
-  // Get FCM token
-  async getToken() {
+  async getToken(): Promise<string | null> {
     try {
       const token = await messaging().getToken();
       console.log('FCM Token:', token);
@@ -38,81 +46,239 @@ class NotificationService {
     }
   }
 
-  // Subscribe to foreground messages
-  onForegroundMessage(callback: (message: any) => void) {
-    return messaging().onMessage(callback);
+  // Handle incoming foreground messages
+  onForegroundMessage(callback: (message: any) => void): (() => void) {
+    this.foregroundMessageListener = messaging().onMessage(async (remoteMessage) => {
+      console.log('Foreground message received:', remoteMessage);
+      callback(remoteMessage);
+    });
+
+    return this.foregroundMessageListener;
   }
 
-  // Subscribe to background messages
-  onBackgroundMessage(callback: (message: any) => Promise<any>) {
-    return messaging().setBackgroundMessageHandler(callback);
+  // Handle notification when app is in background
+  setupBackgroundMessageHandler() {
+    messaging().setBackgroundMessageHandler(async (remoteMessage) => {
+      console.log('Background message handled:', remoteMessage);
+      
+      if (remoteMessage.data?.type === 'incoming_call') {
+        this.handleIncomingCall(remoteMessage);
+      }
+    });
   }
 
-  // Save FCM token to user profile
-  async saveTokenToUserProfile(userId: string, token: string) {
+  // Handle incoming call notification
+  private handleIncomingCall(remoteMessage: FirebaseMessagingTypes.RemoteMessage) {
+    const callData = remoteMessage.data;
+    
+    if (callData?.type === 'incoming_call') {
+      this.showIncomingCallNotification(callData);
+    }
+  }
+
+  // Show local notification for incoming call
+  private showIncomingCallNotification(callData: any) {
+    Vibration.vibrate([0, 500, 500, 500], true);
+
+    if (this.navigationRef) {
+      this.navigationRef.navigate('IncomingCall' as never, {
+        screen: 'IncomingCall',
+        params: {
+          callData: {
+            callerId: callData.callerId,
+            callerName: callData.callerName,
+            callerAvatar: callData.callerAvatar,
+            callId: callData.callId,
+            type: callData.callType || 'video',
+          },
+        },
+      } as never);
+    }
+  }
+
+  // Send call notification via Firestore
+  async sendCallNotification({
+    receiverId,
+    callerId,
+    callerName,
+    callerAvatar,
+    callId,
+    callType = 'video',
+  }: {
+    receiverId: string;
+    callerId: string;
+    callerName: string;
+    callerAvatar?: string;
+    callId: string;
+    callType?: 'video' | 'audio';
+  }) {
+    try {
+      await firestore()
+        .collection('calls')
+        .doc(callId)
+        .set({
+          callId,
+          callerId,
+          callerName,
+          callerAvatar,
+          callType,
+          status: 'ringing',
+          receiverId,
+          createdAt: serverTimestamp(),
+        }, { merge: true });
+
+      // Update receiver's user document with incoming call
+      await firestore()
+        .collection('users')
+        .doc(receiverId)
+        .set({
+          incomingCall: {
+            callId,
+            callerId,
+            callerName,
+            callerAvatar,
+            callType,
+            timestamp: serverTimestamp(),
+          }
+        }, { merge: true });
+
+      console.log('Call notification sent via Firestore');
+    } catch (error) {
+      console.error('Error sending call notification:', error);
+    }
+  }
+
+  // Cancel/End call notification
+  async cancelCallNotification(callId: string, receiverId?: string) {
+    try {
+      Vibration.cancel();
+      
+      await firestore()
+        .collection('calls')
+        .doc(callId)
+        .update({
+          status: 'ended',
+          endedAt: serverTimestamp(),
+        });
+
+      // Clear receiver's incoming call if provided
+      if (receiverId) {
+        await firestore()
+          .collection('users')
+          .doc(receiverId)
+          .update({
+            incomingCall: null,
+          });
+      }
+
+      console.log('Call notification cancelled');
+    } catch (error) {
+      console.error('Error cancelling call notification:', error);
+    }
+  }
+
+  // NEW METHOD: Send notification to user (for chat messages)
+  async sendNotificationToUser(receiverId: string, notification: {
+    title: string;
+    body: string;
+    data?: Record<string, string>;
+  }) {
+    try {
+      // Update receiver's user document with notification
+      await firestore()
+        .collection('users')
+        .doc(receiverId)
+        .set({
+          lastNotification: {
+            title: notification.title,
+            body: notification.body,
+            data: notification.data || {},
+            timestamp: serverTimestamp(),
+            read: false,
+          }
+        }, { merge: true });
+
+      console.log('Notification sent to user via Firestore:', notification.title);
+    } catch (error) {
+      console.error('Error sending notification to user:', error);
+    }
+  }
+
+  // Listen for incoming calls
+  listenForIncomingCalls(userId: string, onIncomingCall: (callData: any) => void): () => void {
+    const unsubscribe = firestore()
+      .collection('users')
+      .doc(userId)
+      .onSnapshot((doc) => {
+        const data = doc.data();
+        if (data?.incomingCall) {
+          const callData = data.incomingCall;
+          
+          if (callData.callId) {
+            Vibration.vibrate([0, 500, 500, 500], true);
+            
+            onIncomingCall({
+              callId: callData.callId,
+              callerId: callData.callerId,
+              callerName: callData.callerName,
+              callerAvatar: callData.callerAvatar,
+              type: callData.callType || 'video',
+            });
+          }
+        }
+      });
+
+    return unsubscribe;
+  }
+
+  // Listen for chat notifications
+  listenForNotifications(userId: string, onNotification: (notification: any) => void): () => void {
+    const unsubscribe = firestore()
+      .collection('users')
+      .doc(userId)
+      .onSnapshot((doc) => {
+        const data = doc.data();
+        if (data?.lastNotification && !data.lastNotification.read) {
+          onNotification(data.lastNotification);
+        }
+      });
+
+    return unsubscribe;
+  }
+
+  // Mark notification as read
+  async markNotificationAsRead(userId: string) {
     try {
       await firestore()
         .collection('users')
         .doc(userId)
         .update({
-          fcmToken: token,
+          'lastNotification.read': true,
         });
-      console.log('FCM token saved to user profile');
     } catch (error) {
-      console.error('Error saving FCM token:', error);
+      console.error('Error marking notification as read:', error);
     }
   }
 
-  // Send push notification to a user
-  async sendNotificationToUser(userId: string, notificationData: any) {
+  // Clear incoming call from user document
+  async clearIncomingCall(userId: string) {
     try {
-      // Get user's FCM token from Firestore
-      const userDoc = await firestore().collection('users').doc(userId).get();
-      const userData = userDoc.data();
-      const fcmToken = userData?.fcmToken;
-
-      if (!fcmToken) {
-        console.log('No FCM token found for user');
-        return false;
-      }
-
-      // For demo purposes, we'll log the notification data
-      // In production, you'd send this to your server which would use FCM HTTP API
-      console.log('Would send notification to:', fcmToken);
-      console.log('Notification data:', notificationData);
-
-      // Simulate successful notification
-      return true;
+      await firestore()
+        .collection('users')
+        .doc(userId)
+        .update({
+          incomingCall: null,
+        });
+      Vibration.cancel();
     } catch (error) {
-      console.error('Error sending notification:', error);
-      return false;
+      console.error('Error clearing incoming call:', error);
     }
   }
 
-  // Handle notification when app is opened from background
-  async handleNotificationOpenedApp(callback: (message: any) => void) {
-    const unsubscribe = messaging().onNotificationOpenedApp(remoteMessage => {
-      console.log('Notification caused app to open from background state:', remoteMessage);
-      callback(remoteMessage);
-    });
-
-    // Check if app was opened from a notification when app was closed
-    const initialNotification = await messaging().getInitialNotification();
-    if (initialNotification) {
-      console.log('App opened from notification when closed:', initialNotification);
-      callback(initialNotification);
-    }
-
-    return unsubscribe;
-  }
-
-  // Delete FCM token when user logs out
-  async deleteToken() {
-    try {
-      await messaging().deleteToken();
-      console.log('FCM token deleted');
-    } catch (error) {
-      console.error('Error deleting FCM token:', error);
+  // Clean up
+  cleanup() {
+    if (this.foregroundMessageListener) {
+      this.foregroundMessageListener();
     }
   }
 }

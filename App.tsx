@@ -2,7 +2,7 @@ import { StyleSheet, Text, View } from 'react-native';
 import React from 'react';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
-import { NavigationContainer } from '@react-navigation/native';
+import { NavigationContainer, NavigationContainerRef } from '@react-navigation/native';
 import AppNavigator from './src/core/navigation/AppNavigator';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { AuthProvider } from './src/core/context/AuthContext';
@@ -10,6 +10,7 @@ import Toast from 'react-native-toast-message';
 import CustomToast from './src/shared/components/CustomToast';
 import NotificationHandler from './src/shared/components/NotificationHandler';
 
+export const navigationRef = React.createRef<NavigationContainerRef>();
 
 // Define the root stack parameter list
 export type RootStackParamList = {
@@ -22,8 +23,13 @@ const App = () => {
   return (
     <AuthProvider>
       <GestureHandlerRootView style={{ flex: 1 }}>
-        <NavigationContainer>
-          <SafeAreaProvider>
+        <NavigationContainer ref={navigationRef}>
+          <SafeAreaProvider 
+            initialMetrics={{
+              frame: { x: 0, y: 0, width: 0, height: 0 },
+              insets: { top: 0, left: 0, right: 0, bottom: 0 },
+            }}
+          >
             <Stack.Navigator screenOptions={{ headerShown: false }}>
               <Stack.Screen name="AppNav" component={AppNavigator} />
             </Stack.Navigator>

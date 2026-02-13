@@ -5,7 +5,7 @@ export const Colors = {
   black: '#000000',
   
   // Primary colors
-  primary: '#24786D',
+  primary: ' #24786D',
   green6D: '#24786D',
   greenB6: '#58C3B6',
   

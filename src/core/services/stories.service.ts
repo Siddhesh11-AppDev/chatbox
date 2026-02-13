@@ -1,11 +1,14 @@
-import firestore from '@react-native-firebase/firestore';
+import firestore, { serverTimestamp, FieldValue } from '@react-native-firebase/firestore';
+import RNFS from 'react-native-fs';
+import { Buffer } from 'buffer';
 
 export interface Story {
   id: string;
   userId: string;
   userName: string;
   userAvatar: string;
-  mediaUrl: string;
+  mediaUrl?: string;
+  mediaData?: string;
   mediaType: 'image' | 'video';
   caption?: string;
   timestamp: FirebaseFirestoreTypes.Timestamp;
@@ -24,49 +27,73 @@ export interface StoryUser {
 class StoriesService {
   private firestore = firestore();
 
-  // Convert and compress media for Firestore storage
-  async uploadStoryMedia(userId: string, mediaUri: string, mediaType: 'image' | 'video'): Promise<string> {
+  async convertMediaToBase64(mediaUri: string): Promise<string> {
     try {
-      console.log('Starting image processing for:', mediaUri);
-      
-      // For images, just return the URI directly (same as UserMessage approach)
-      if (mediaType === 'image') {
-        console.log('Storing image URI directly:', mediaUri);
-        return mediaUri; // Return URI directly without processing
+      let processedUri = mediaUri;
+      if (mediaUri.startsWith('content://')) {
+        const tempPath = `${RNFS.CachesDirectoryPath}/temp_media_${Date.now()}.${mediaUri.split('.').pop() || 'jpg'}`;
+        await RNFS.copyFile(mediaUri, tempPath);
+        processedUri = tempPath;
       }
-
-      // For videos, handle separately if needed
-      console.log('Video detected - returning original URI');
-      return mediaUri;
-
+      
+      const base64Data = await RNFS.readFile(processedUri, 'base64');
+      
+      if (processedUri.includes('/temp_media_')) {
+        try {
+          await RNFS.unlink(processedUri);
+        } catch (cleanupError) {
+          console.warn('Could not clean up temp file:', cleanupError);
+        }
+      }
+      
+      return base64Data;
     } catch (error) {
-      console.error('Error processing story media:', error);
-      return mediaUri; // Return original URI on error
+      console.error('Error converting media to base64:', error);
+      throw error;
     }
   }
 
-  // Create a new story
+  async uploadStoryMedia(userId: string, mediaUri: string, mediaType: 'image' | 'video'): Promise<string> {
+    try {
+      console.log('Starting media processing for:', mediaUri);
+      
+      const base64Data = await this.convertMediaToBase64(mediaUri);
+      
+      const base64SizeKB = Math.ceil(base64Data.length / 1024);
+      if (base64SizeKB > 900) {
+        throw new Error(`Media too large (${base64SizeKB}KB) to upload. Maximum size is ~900KB.`);
+      }
+      
+      console.log('Successfully converted media to base64, size:', base64SizeKB, 'KB');
+      return base64Data;
+    } catch (error) {
+      console.error('Error processing story media:', error);
+      throw error;
+    }
+  }
+
   async createStory(
     userId: string,
     userName: string,
     userAvatar: string,
-    mediaUrl: string,
+    mediaUri: string,
     mediaType: 'image' | 'video',
     caption?: string
   ): Promise<string> {
     try {
       console.log('Creating story for user:', userId);
-      // Add the story document with server timestamp
+      
+      const mediaData = await this.uploadStoryMedia(userId, mediaUri, mediaType);
+      
       const storyData = {
         userId,
         userName,
         userAvatar,
-        mediaUrl,
+        mediaData,
         mediaType,
         caption,
         viewers: [],
-        timestamp: firestore.FieldValue.serverTimestamp(),
-        // expiresAt will be calculated on the client side as timestamp + 24 hours
+        timestamp: serverTimestamp(),
       };
 
       const storyRef = await this.firestore.collection('stories').add(storyData);
@@ -78,7 +105,6 @@ class StoriesService {
       throw error;
     }
   }
-
 
   async cleanupExpiredStories(): Promise<void> {
     try {
@@ -105,93 +131,147 @@ class StoriesService {
     }
   }
 
-  // Enhanced listenToStories with cleanup
-  listenToStories(currentUserId: string, callback: (storyUsers: StoryUser[]) => void) {
+
+private async getChatPartners(userId: string): Promise<string[]> {
+  try {
+    // Get all chats and filter client-side (avoids index requirement)
+    const chatsSnapshot = await this.firestore
+      .collection('chats')
+      .get();
+    
+    const partners = new Set<string>();
+    chatsSnapshot.docs.forEach(doc => {
+      const chat = doc.data();
+      if (chat.participants && Array.isArray(chat.participants)) {
+        chat.participants.forEach((participantId: string) => {
+          if (participantId !== userId) {
+            partners.add(participantId);
+          }
+        });
+      }
+    });
+    
+    console.log('Chat partners found:', Array.from(partners));
+    return Array.from(partners);
+  } catch (error) {
+    console.error('Error getting chat partners:', error);
+    return [];
+  }
+}
+
+
+
+
+  async listenToStories(currentUserId: string, callback: (storyUsers: StoryUser[]) => void) {
     console.log('Listening to stories for user:', currentUserId);
     
-    // Run cleanup once when listener starts
-    this.cleanupExpiredStories();
-    
-    return this.firestore
-      .collection('stories')
-      .orderBy('timestamp', 'desc')
-      .onSnapshot(async snapshot => {
-        try {
-          console.log('Stories snapshot received, docs count:', snapshot.docs.length);
-          const storyUsers: StoryUser[] = [];
-
-          // Group stories by user
-          const storiesByUser: Record<string, Story[]> = {};
-
-          snapshot.docs.forEach(doc => {
-            console.log('Processing document:', doc.id, doc.data());
-            const story = {
-              id: doc.id,
-              ...doc.data() as Omit<Story, 'id'>,
-            };
+    try {
+      const chatPartners = await this.getChatPartners(currentUserId);
+      console.log('Chat partners found:', chatPartners);
+      
+      this.cleanupExpiredStories();
+      
+      // Get all stories and filter client-side
+      const unsubscribe = this.firestore
+        .collection('stories')
+        .orderBy('timestamp', 'desc')
+        .onSnapshot(
+          (snapshot) => {
+            console.log('Stories snapshot received, docs count:', snapshot.docs.length);
             
-            // Check if story is expired (older than 24 hours)
-            try {
-              const storyTimestamp = story.timestamp;
-              if (storyTimestamp) {
-                const storyTime = storyTimestamp.toDate().getTime();
-                const currentTime = Date.now();
-                const twentyFourHours = 24 * 60 * 60 * 1000;
+            const storyUsers: StoryUser[] = [];
+            const storiesByUser: Record<string, Story[]> = {};
+            const now = Date.now();
+            const twentyFourHours = 24 * 60 * 60 * 1000;
 
-                if ((currentTime - storyTime) <= twentyFourHours) {
-                  if (!storiesByUser[story.userId]) {
-                    storiesByUser[story.userId] = [];
+            snapshot.forEach((doc) => {
+              const story = {
+                id: doc.id,
+                ...doc.data() as Omit<Story, 'id'>,
+              };
+              
+              // TEMPORARY: Show ALL stories for testing
+              // Remove this line to enable private stories
+              const shouldShow = true;
+                
+              console.log(`Story: ${story.id}, userId: ${story.userId}, currentUser: ${currentUserId}`);
+              
+              if (!shouldShow) {
+                return;
+              }
+                
+              try {
+                const storyTimestamp = story.timestamp;
+                if (storyTimestamp) {
+                  const storyTime = storyTimestamp.toDate().getTime();
+                  if ((now - storyTime) <= twentyFourHours) {
+                    if (!storiesByUser[story.userId]) {
+                      storiesByUser[story.userId] = [];
+                    }
+                    storiesByUser[story.userId].push(story);
+                  } else {
+                    console.log('Story expired:', story.id);
                   }
-                  storiesByUser[story.userId].push(story);
+                }
+              } catch (error) {
+                console.error('Error processing story:', error);
+              }
+            });
+
+            console.log('Stories by user:', Object.keys(storiesByUser));
+            
+            const processUsers = async () => {
+              for (const [userId, stories] of Object.entries(storiesByUser)) {
+                console.log(`Processing user ${userId} with ${stories.length} stories`);
+                
+                try {
+                  const userDoc = await this.firestore.collection('users').doc(userId).get();
+                  if (userDoc.exists) {
+                    const userData = userDoc.data();
+                    const hasUnviewed = stories.some(story => !story.viewers.includes(currentUserId));
+
+                    storyUsers.push({
+                      userId,
+                      userName: userData?.name || '',
+                      userAvatar: userData?.profile_image || `https://ui-avatars.com/api/?name=${encodeURIComponent(userData?.name || 'U')}`,
+                      stories: stories.sort((a, b) => b.timestamp.toMillis() - a.timestamp.toMillis()),
+                      hasUnviewed,
+                    });
+                  }
+                } catch (error) {
+                  console.error(`Error fetching user data for ${userId}:`, error);
                 }
               }
-            } catch (error) {
-              console.error('Error processing story timestamp:', error);
-            }
-          });
-
-          // Get user details for each story user
-          console.log('Processing stories for users:', Object.keys(storiesByUser));
-          for (const [userId, stories] of Object.entries(storiesByUser)) {
-            console.log(`Processing user ${userId} with ${stories.length} stories`);
+            };
             
-            try {
-              const userDoc = await this.firestore.collection('users').doc(userId).get();
-              if (userDoc.exists) {
-                const userData = userDoc.data();
-                const hasUnviewed = stories.some(story => !story.viewers.includes(currentUserId));
-
-                storyUsers.push({
-                  userId,
-                  userName: userData?.name || '',
-                  userAvatar: userData?.profile_image || `https://ui-avatars.com/api/?name=${encodeURIComponent(userData?.name || 'U')}`,
-                  stories: stories.sort((a, b) => b.timestamp.toMillis() - a.timestamp.toMillis()),
-                  hasUnviewed,
-                });
-              }
-            } catch (error) {
-              console.error(`Error fetching user data for ${userId}:`, error);
-            }
+            processUsers().then(() => {
+              callback(storyUsers);
+            }).catch((error) => {
+              console.error('Error processing stories:', error);
+              callback(storyUsers);
+            });
+          },
+          (error) => {
+            console.error('Firestore snapshot error:', error);
+            callback([]);
           }
+        );
 
-          callback(storyUsers);
-        } catch (error) {
-          console.error('Error processing stories snapshot:', error);
-        }
-      });
+    return unsubscribe;
+  } catch (error) {
+    console.error('Error setting up stories listener:', error);
+    return () => {};
   }
+}
 
-  // Get your own stories - FIXED VERSION
   async getMyStories(userId: string): Promise<Story[]> {
     try {
       console.log('=== GET MY STORIES DEBUG ===');
       console.log('Getting stories for user:', userId);
       
-      // SIMPLIFIED QUERY - Remove the composite index requirement
       const snapshot = await this.firestore
         .collection('stories')
         .where('userId', '==', userId)
-        // Removed orderBy to avoid composite index requirement
         .get();
 
       console.log('Found', snapshot.size, 'story documents for user');
@@ -206,7 +286,6 @@ class StoriesService {
           ...doc.data() as Omit<Story, 'id'>,
         };
 
-        // Check if story is expired (older than 24 hours)
         const storyTimestamp = story.timestamp;
         if (storyTimestamp) {
           const storyTime = storyTimestamp.toDate().getTime();
@@ -220,7 +299,6 @@ class StoriesService {
         }
       });
 
-      // Sort manually after filtering
       stories.sort((a, b) => b.timestamp.toMillis() - a.timestamp.toMillis());
 
       console.log('Found', stories.length, 'active stories for user');
@@ -228,7 +306,6 @@ class StoriesService {
       return stories;
     } catch (error) {
       console.error('Error getting my stories:', error);
-      // Show the specific error message
       if (error.code === 'failed-precondition') {
         console.error('Firestore index error - this is expected and handled');
       }
@@ -236,7 +313,6 @@ class StoriesService {
     }
   }
 
-  // Delete a story
   async deleteStory(storyId: string): Promise<void> {
     try {
       console.log('Deleting story:', storyId);
@@ -248,14 +324,13 @@ class StoriesService {
     }
   }
 
-  // Mark story as viewed
   async markStoryAsViewed(storyId: string, userId: string): Promise<void> {
     try {
       await this.firestore
         .collection('stories')
         .doc(storyId)
         .update({
-          viewers: firestore.FieldValue.arrayUnion(userId),
+          viewers: FieldValue.arrayUnion(userId),
         });
     } catch (error) {
       console.error('Error marking story as viewed:', error);
@@ -264,7 +339,6 @@ class StoriesService {
   }
 }
 
-// Export with error handling
 let storiesServiceInstance: StoriesService | null = null;
 
 try {

@@ -22,7 +22,10 @@ import firestore, {
   startAfter,
   deleteDoc,
   doc,
+  FieldValue,
 } from '@react-native-firebase/firestore';
+import { navigationRef } from '../../core/navigation/AppNavigator';
+import { notificationService } from '../../core/services/notification.service';
 import Feather from 'react-native-vector-icons/Feather';
 import FontAwesome from 'react-native-vector-icons/FontAwesome';
 import { useNavigation } from '@react-navigation/native';
@@ -77,7 +80,7 @@ const Messages = () => {
   const [refreshing, setRefreshing] = useState(false);
 
   // Toggle search bar animation
- const toggleSearchBar = () => {
+  const toggleSearchBar = () => {
     if (isSearchActive) {
       Animated.parallel([
         Animated.timing(searchWidth, {
@@ -95,7 +98,7 @@ const Messages = () => {
     } else {
       Animated.parallel([
         Animated.timing(searchWidth, {
-          toValue: 350,
+          toValue: 300,
           duration: 250,
           useNativeDriver: false,
         }),
@@ -310,8 +313,6 @@ const Messages = () => {
     };
   }, [conversationUsers, user, users]);
 
- 
-
   // Delete conversation function - unilateral deletion for current user
   // This removes all conversation data for the current user but keeps it for the other user
   // When starting a new conversation later, it will be fresh and empty
@@ -350,7 +351,7 @@ const Messages = () => {
               // This allows for a fresh start when creating a new conversation
               const chatDocRef = doc(firestore(), 'chats', chatId);
               await chatDocRef.update({
-                deleted_for_users: firestore.FieldValue.arrayUnion(user.uid),
+                deleted_for_users: FieldValue.arrayUnion(user.uid),
               });
 
               await batch.commit();
@@ -462,7 +463,7 @@ const Messages = () => {
       .collection('stories')
       .where('userId', '==', user.uid);
 
-    const unsubscribe = onSnapshot(storiesRef, async (snapshot) => {
+    const unsubscribe = onSnapshot(storiesRef, async snapshot => {
       const stories: any[] = [];
       const now = Date.now();
       const twentyFourHours = 24 * 60 * 60 * 1000;
@@ -477,8 +478,8 @@ const Messages = () => {
         const storyTimestamp = story.timestamp;
         if (storyTimestamp) {
           const storyTime = storyTimestamp.toDate().getTime();
-          
-          if ((now - storyTime) <= twentyFourHours) {
+
+          if (now - storyTime <= twentyFourHours) {
             stories.push(story);
           }
         }
@@ -512,7 +513,9 @@ const Messages = () => {
       };
 
       // Filter out the current user from storyUsers to avoid duplicates
-      const otherUsersStories = storyUsers.filter(storyUser => storyUser.userId !== user!.uid);
+      const otherUsersStories = storyUsers.filter(
+        storyUser => storyUser.userId !== user!.uid,
+      );
 
       navigation.navigate('StoryViewer' as any, {
         storyUsers: [myStoryUser, ...otherUsersStories],
@@ -530,11 +533,14 @@ const Messages = () => {
     console.log('Stories count:', stories.length);
     if (stories.length > 0) {
       console.log('First story user:', stories[0]);
-      console.log('First story user stories count:', stories[0].stories?.length || 0);
+      console.log(
+        'First story user stories count:',
+        stories[0].stories?.length || 0,
+      );
     }
     console.log('Initial index:', index);
     console.log('================================');
-    
+
     navigation.navigate('StoryViewer' as any, {
       storyUsers: stories,
       initialIndex: index,
@@ -589,8 +595,7 @@ const Messages = () => {
     }
   };
 
-
- // Listen to stories
+  // Listen to stories
   useEffect(() => {
     if (!userProfile) return; // Changed from !user
 
@@ -611,7 +616,7 @@ const Messages = () => {
             userId: storyUser.userId,
             userName: storyUser.userName,
             storiesCount: storyUser.stories.length,
-            hasUnviewed: storyUser.hasUnviewed
+            hasUnviewed: storyUser.hasUnviewed,
           });
         });
         console.log('=============================');
@@ -619,7 +624,11 @@ const Messages = () => {
       },
     );
 
-    return () => unsubscribe();
+    return () => {
+      if (typeof unsubscribe === 'function') {
+        unsubscribe();
+      }
+    };
   }, [userProfile]); // Changed from [user]
 
   // Update other useEffects to use userProfile
@@ -693,7 +702,7 @@ const Messages = () => {
 
       <View style={styles.storiesContainer}>
         <FlatList
-          data={[ 
+          data={[
             { id: 'yours', isYourStory: true },
             // Show ALL story users including yourself (but handle duplicates in UI)
             ...storyUsers.map(storyUser => ({
@@ -702,16 +711,21 @@ const Messages = () => {
             })),
           ]}
           horizontal
-          keyExtractor={(item, index) => item.id || item.userId || `index-${index}`}
+          keyExtractor={(item, index) =>
+            item.id || item.userId || `index-${index}`
+          }
           showsHorizontalScrollIndicator={false}
           renderItem={({ item, index }) => {
             console.log(`Rendering item ${index}:`, item);
-            
+
             // "Your Story" section
             if (item.isYourStory) {
               const hasActiveStories = myStories.length > 0; // Use myStories state instead of checking storyUsers
 
-              console.log('Rendering YOUR STORY section, hasActiveStories:', hasActiveStories);
+              console.log(
+                'Rendering YOUR STORY section, hasActiveStories:',
+                hasActiveStories,
+              );
 
               return (
                 <TouchableOpacity
@@ -744,14 +758,14 @@ const Messages = () => {
 
             // Other users' stories (including yourself if you have stories)
             const storyUser = item as StoryUser;
-            
+
             // Skip rendering your own stories in the main list to avoid duplicates
             if (storyUser.userId === userProfile?.uid) {
               return null; // Don't render your own stories here
             }
 
             console.log('Rendering OTHER USER story:', storyUser.userName);
-            
+
             return (
               <TouchableOpacity
                 style={styles.storyItem}
@@ -760,14 +774,19 @@ const Messages = () => {
                   console.log('Clicked on story user:', storyUser);
                   console.log('Stories count:', storyUser.stories?.length || 0);
                   console.log('Stories data:', storyUser.stories);
-                  
+
                   // Validate that we have stories before navigating
                   if (!storyUser.stories || storyUser.stories.length === 0) {
-                    console.log('No stories found for this user, skipping navigation');
-                    Alert.alert('No Stories', `${storyUser.userName} doesn't have any stories right now.`);
+                    console.log(
+                      'No stories found for this user, skipping navigation',
+                    );
+                    Alert.alert(
+                      'No Stories',
+                      `${storyUser.userName} doesn't have any stories right now.`,
+                    );
                     return;
                   }
-                  
+
                   handleStoryPress([storyUser], 0);
                 }}
               >
@@ -785,7 +804,7 @@ const Messages = () => {
                           encodeURIComponent(storyUser.userName),
                     }}
                     style={styles.storyImage}
-                    onError={(error) => console.log('Image load error:', error)}
+                    onError={error => console.log('Image load error:', error)}
                   />
                 </View>
                 <Text style={styles.storyName} numberOfLines={1}>
@@ -795,15 +814,17 @@ const Messages = () => {
             );
           }}
           ListEmptyComponent={() => (
-            <View style={{ 
-              padding: 20, 
-              backgroundColor: '#333', 
-              margin: 10,
-              borderRadius: 10,
-              minWidth: 200,
-              justifyContent: 'center',
-              alignItems: 'center'
-            }}>
+            <View
+              style={{
+                padding: 20,
+                backgroundColor: '#333',
+                margin: 10,
+                borderRadius: 10,
+                minWidth: 200,
+                justifyContent: 'center',
+                alignItems: 'center',
+              }}
+            >
               <Text style={{ color: '#FFF', textAlign: 'center' }}>
                 No friend stories yet
               </Text>
@@ -818,9 +839,9 @@ const Messages = () => {
   );
 
   return (
-    <SafeAreaView style={{ flex: 1, backgroundColor: '#000' }}>
+    <SafeAreaView style={{ flex: 1, backgroundColor: '#000', }} edges={['top', 'bottom']}>
       <StatusBar barStyle="light-content" backgroundColor="#000" />
-
+      
       <Animated.FlatList
         data={filteredUsers}
         keyExtractor={(item, index) => item.uid || index.toString()}
@@ -850,8 +871,10 @@ const Messages = () => {
                 <Text style={styles.contactName}>{item.name}</Text>
                 <Text style={styles.lastMessage} numberOfLines={1}>
                   {getLastMessage(item.uid)?.startsWith('image:')
-                    ? 'IMG'
-                    : getLastMessage(item.uid) || 'Tap to start chatting'}
+                    ? '📷 Image'
+                    : getLastMessage(item.uid)?.includes('base64')
+                    ? '📷 Image'
+                    : getLastMessage(item.uid)}
                 </Text>
               </View>
 
@@ -1140,6 +1163,3 @@ const styles = StyleSheet.create({
     marginLeft: 5,
   },
 });
-
-
-

@@ -128,37 +128,38 @@ const StoryCreator = () => {
 
     setIsUploading(true);
     try {
-      // Compress image if it's too large using base64
+      console.log('=== UPLOAD STORY START ===');
+      console.log('Selected media:', selectedMedia);
+      console.log('User profile:', userProfile.uid);
+
+      // Compress image if it's too large
       let compressedMediaUri = selectedMedia;
       
       if (mediaType === 'image') {
         compressedMediaUri = await compressImage(selectedMedia);
+        console.log('Image compressed to:', compressedMediaUri);
       }
       
-      // Upload media to Firestore as base64
-      const mediaUrl = await storiesService.uploadStoryMedia(
-        userProfile.uid,
-        compressedMediaUri,
-        mediaType
-      );
-
-      // Create story in Firestore
+      // Create story in Firestore with the original URI (the method will convert to Base64)
+      console.log('Creating story with media URI...');
       await storiesService.createStory(
         userProfile.uid,
         userProfile.name || 'User',
         userProfile.profile_image || '',
-        mediaUrl,
+        compressedMediaUri, // Pass the original URI, not Base64 data
         mediaType,
         caption
       );
 
-      Alert.alert('Success', 'Story uploaded successfully!');
+      console.log('=== UPLOAD STORY SUCCESS ===');
+      Alert.alert('Success', 'Story uploaded successfully');
       navigation.goBack();
     } catch (error: any) {
+      console.error('=== UPLOAD STORY ERROR ===');
       console.error('Error uploading story:', error);
       console.error('Error details:', error.message || error);
       
-      let errorMessage = 'Failed to upload story. Please try again.';
+      let errorMessage = 'Failed to upload story with Base64 encoding. Please try again.';
       if (error.code) {
         errorMessage += `\nError code: ${error.code}`;
       }

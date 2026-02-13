@@ -45,8 +45,8 @@ const CustomToast: React.FC<ToastProps> = ({ type, text1 = '', text2 = '', onPre
       default:
         return {
           container: styles.infoContainer,
-          icon: 'info',
-          iconColor: Colors.primary,
+          icon: 'message',
+          iconColor: Colors.success,
           titleColor: Colors.primary,
         };
     }
@@ -93,8 +93,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     paddingHorizontal: 16,
     paddingVertical: 4,
-    // marginHorizontal: 16,
-    marginVertical: 8,
+    marginVertical:8,
     borderRadius: 12,
     shadowColor: '#000',
     shadowOffset: {
@@ -152,6 +151,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#E3F2FD',
     borderLeftWidth: 4,
     borderLeftColor: Colors.primary,
+   
   },
 });
 

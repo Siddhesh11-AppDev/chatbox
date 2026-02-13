@@ -1,10 +1,8 @@
-
-
-
-// src/firebase/chat.service.ts
-import firestore from '@react-native-firebase/firestore';
+import firestore, { serverTimestamp } from '@react-native-firebase/firestore';
 import { COLLECTIONS } from './collection';
 import { notificationService } from './notification.service';
+import RNFS from 'react-native-fs';
+import { Buffer } from 'buffer';
 
 interface Message {
   id?: string;
@@ -13,6 +11,8 @@ interface Message {
   text: string;
   timestamp: any;
   read: boolean;
+  type?: 'text' | 'image';
+  imageData?: string;
 }
 
 interface Chat {
@@ -25,13 +25,11 @@ interface Chat {
 class ChatService {
   private firestore = firestore();
 
-  // Create a unique chat ID for two users
   getChatId = (userId1: string, userId2: string): string => {
     const sortedIds = [userId1, userId2].sort();
     return `${sortedIds[0]}_${sortedIds[1]}`;
   };
 
-  // Create a new chat room between two users if it doesn't exist
   async createChatIfNotExists(userId1: string, userId2: string) {
     const chatId = this.getChatId(userId1, userId2);
     const chatRef = this.firestore.collection(COLLECTIONS.CHATS).doc(chatId);
@@ -40,9 +38,9 @@ class ChatService {
     if (!chatSnap.exists) {
       const chatData = {
         participants: [userId1, userId2].sort(),
-        createdAt: firestore.FieldValue.serverTimestamp(),
+        createdAt: serverTimestamp(),
         lastMessage: '',
-        lastMessageTime: firestore.FieldValue.serverTimestamp(),
+        lastMessageTime: serverTimestamp(),
       };
 
       await chatRef.set(chatData);
@@ -51,8 +49,33 @@ class ChatService {
     return chatId;
   }
 
-  // Send a message (Firestore only)
-  async sendMessage(senderId: string, receiverId: string, text: string) {
+  async convertImageToBase64(imageUri: string): Promise<string> {
+    try {
+      let processedUri = imageUri;
+      if (imageUri.startsWith('content://')) {
+        const tempPath = `${RNFS.CachesDirectoryPath}/temp_image_${Date.now()}.jpg`;
+        await RNFS.copyFile(imageUri, tempPath);
+        processedUri = tempPath;
+      }
+      
+      const base64Data = await RNFS.readFile(processedUri, 'base64');
+      
+      if (processedUri.includes('/temp_image_')) {
+        try {
+          await RNFS.unlink(processedUri);
+        } catch (cleanupError) {
+          console.warn('Could not clean up temp file:', cleanupError);
+        }
+      }
+      
+      return base64Data;
+    } catch (error) {
+      console.error('Error converting image to base64:', error);
+      throw error;
+    }
+  }
+
+  async sendMessage(senderId: string, receiverId: string, text: string, imageUri?: string) {
     try {
       const chatId = this.getChatId(senderId, receiverId);
       await this.createChatIfNotExists(senderId, receiverId);
@@ -62,35 +85,62 @@ class ChatService {
         .doc(chatId)
         .collection('messages');
 
-      const messageData = {
+      let messageData: Partial<Message> = {
         senderId,
         receiverId,
         text,
-        timestamp: firestore.FieldValue.serverTimestamp(),
+        timestamp: serverTimestamp(),
         read: false,
       };
 
-      const messageDoc = await messagesRef.add(messageData);
+      if (imageUri) {
+        const base64Data = await this.convertImageToBase64(imageUri);
+        
+        const base64SizeKB = Math.ceil(base64Data.length / 1024);
+        if (base64SizeKB > 900) {
+          throw new Error(`Image too large (${base64SizeKB}KB) to send. Maximum size is ~900KB.`);
+        }
+        
+        messageData.type = 'image';
+        messageData.imageData = base64Data;
+        messageData.text = 'Image';
+        
+        const messageDoc = await messagesRef.add(messageData);
 
-      // Update last message
-      await this.firestore
-        .collection(COLLECTIONS.CHATS)
-        .doc(chatId)
-        .set(
-          {
-            lastMessage: text,
-            lastMessageTime: firestore.FieldValue.serverTimestamp(),
-          },
-          { merge: true },
-        );
+        await this.firestore
+          .collection(COLLECTIONS.CHATS)
+          .doc(chatId)
+          .set(
+            {
+              lastMessage: '📷 Image',
+              lastMessageTime: serverTimestamp(),
+            },
+            { merge: true },
+          );
+      } else {
+        messageData.type = 'text';
+        
+        const messageDoc = await messagesRef.add(messageData);
 
-      // Send push notification to receiver
+        await this.firestore
+          .collection(COLLECTIONS.CHATS)
+          .doc(chatId)
+          .set(
+            {
+              lastMessage: text,
+              lastMessageTime: serverTimestamp(),
+            },
+            { merge: true },
+          );
+      }
+
+      const finalMessageDoc = await messagesRef.orderBy('timestamp', 'desc').limit(1).get();
+      const latestMessage = finalMessageDoc.docs[0];
+      
       try {
-        // Get sender's name for notification
         const senderDoc = await this.firestore.collection('users').doc(senderId).get();
         const senderName = senderDoc.exists ? senderDoc.data()?.name || 'Someone' : 'Someone';
         
-        // Send notification
         await notificationService.sendNotificationToUser(receiverId, {
           title: 'New Message',
           body: `${senderName}: ${text.substring(0, 50)}${text.length > 50 ? '...' : ''}`,
@@ -99,22 +149,20 @@ class ChatService {
             senderId: senderId,
             receiverId: receiverId,
             chatId: chatId,
-            messageId: messageDoc.id,
+            messageId: latestMessage.id,
           }
         });
       } catch (notificationError) {
         console.error('Error sending notification:', notificationError);
-        // Don't throw error if notification fails, just log it
       }
 
-      return messageDoc.id;
+      return latestMessage.id;
     } catch (error) {
       console.error('Error sending message:', error);
       throw error;
     }
   }
 
-  // Listen for real-time messages (Firestore only)
   listenToMessages(chatId: string, callback: (messages: Message[]) => void) {
     return this.firestore
       .collection(COLLECTIONS.CHATS)
@@ -130,7 +178,6 @@ class ChatService {
       });
   }
 
-  // Get all chats for a user
   getUserChats(userId: string, callback: (chats: Chat[]) => void) {
     return this.firestore
       .collection(COLLECTIONS.CHATS)

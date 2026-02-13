@@ -1,10 +1,12 @@
 import {
+  Dimensions,
   Image,
   StatusBar,
   StyleSheet,
   Text,
   TouchableOpacity,
   View,
+  useWindowDimensions,
 } from 'react-native';
 import React from 'react';
 import { Images } from '../../shared/assets/images';
@@ -14,6 +16,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 const OnBoarding = () => {
   const navigation = useNavigation();
+  const { width, height } = useWindowDimensions();
 
   const handleSignUp = () => {
     navigation.navigate('Auth' as never);
@@ -23,34 +26,50 @@ const OnBoarding = () => {
     navigation.navigate('Auth' as never, { screen: 'Signin' as never });
   };
 
+  // Responsive calculations
+  const isSmallDevice = height < 800;
+  const isLargeDevice = height > 650;
+  
+  const logoSize = isSmallDevice ? width * 0.25 : isLargeDevice ? width * 0.35 : width * 0.3;
+  const titleSize = isSmallDevice ? 48 : isLargeDevice ? 60 : 58;
+  const subtitleSize = isSmallDevice ? 18 : 16;
+  const buttonMarginTop = isSmallDevice ? 20 : 40;
+  const socialGap = isSmallDevice ? 20 : 30;
+
   return (
-    <SafeAreaView  style={styles.container}>
+    <SafeAreaView style={styles.container}>
       <StatusBar barStyle="light-content" />
 
       {/* Background Image */}
-      <Image source={Images.LinearImg} style={styles.bgImage} />
+      <Image 
+        source={Images.LinearImg} 
+        style={[styles.bgImage, { height: height }]} 
+      />
 
       {/* Overlay */}
       <View style={styles.overlay}>
         {/* Logo */}
         <View style={styles.logoContainer}>
-          <Image source={Images.LogoTop} style={styles.logo} />
+          <Image 
+            source={Images.LogoTop} 
+            style={[styles.logo, { width: logoSize, height: logoSize }]} 
+          />
         </View>
 
         {/* Content */}
         <View style={styles.content}>
-          <Text style={styles.title}>
+          <Text style={[styles.title, { fontSize: titleSize }]}>
             Connect friends
             <Text style={styles.titleBold}> easily & quickly</Text>
           </Text>
 
-          <Text style={styles.subtitle}>
+          <Text style={[styles.subtitle, { fontSize: subtitleSize }]}>
             Our chat app is the perfect way to stay connected with friends and
             family.
           </Text>
 
           {/* Social Buttons */}
-          <View style={styles.socialRow}>
+          <View style={[styles.socialRow, { gap: socialGap }]}>
             <TouchableOpacity style={styles.socialIcon}>
               <Image source={Images.FacebookImg} style={styles.socialImage} />
             </TouchableOpacity>
@@ -76,12 +95,12 @@ const OnBoarding = () => {
               backgroundColor="#FFF"
               onPress={handleSignUp}
             />
-          </View>
 
           {/* Login */}
           <TouchableOpacity style={styles.loginBtn} onPress={handleLogin}>
             <Text style={styles.loginText}>Existing account? Log in</Text>
           </TouchableOpacity>
+          </View>
         </View>
       </View>
     </SafeAreaView >
@@ -98,25 +117,21 @@ const styles = StyleSheet.create({
 
   bgImage: {
     width: '100%',
-    height: '100%',
+    position: 'absolute',
     resizeMode: 'cover',
   },
 
   overlay: {
+    flex: 1,
     zIndex: 1,
-    position: 'absolute',
-    marginTop: 20,
   },
 
   logoContainer: {
-    height: '14%',
-    justifyContent: 'center',
     alignItems: 'center',
+    marginTop: 20,
   },
 
   logo: {
-    width: '30%',
-    height: '30%',
     resizeMode: 'contain',
   },
 
@@ -129,9 +144,8 @@ const styles = StyleSheet.create({
 
   title: {
     color: '#fff',
-    fontSize: 68,
     fontWeight: '400',
-    lineHeight: 70,
+    lineHeight: 65,
   },
 
   titleBold: {
@@ -140,15 +154,13 @@ const styles = StyleSheet.create({
 
   subtitle: {
     color: '#B9C1BE',
-    fontSize: 18,
-    lineHeight: 28,
+    lineHeight: 24,
     marginTop: 20,
   },
 
   socialRow: {
     flexDirection: 'row',
     justifyContent: 'center',
-    gap: 30,
     marginTop: 40,
   },
 
@@ -183,7 +195,7 @@ const styles = StyleSheet.create({
   orText: {
     color: '#D6E4E0',
     marginHorizontal: 12,
-    fontSize: 18,
+    fontSize: 14,
   },
 
   buttonWrapper: {
@@ -192,11 +204,11 @@ const styles = StyleSheet.create({
 
   loginBtn: {
     alignItems: 'center',
-    marginTop: 50,
+    marginTop: 30,
   },
 
   loginText: {
     color: '#fff',
-    fontSize: 18,
+    fontSize: 16,
   },
 });

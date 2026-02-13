@@ -18,6 +18,9 @@ import { FirebaseWebRTCService } from '../../core/services/FirebaseWebRTCService
 import { useAuth } from '../../core/context/AuthContext';
 import firestore from '@react-native-firebase/firestore';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { notificationService } from '../../core/services/notification.service';
+
+
 
 const { width, height } = Dimensions.get('window');
 
@@ -27,6 +30,7 @@ const VideoCall = () => {
   const { userData } = route.params as { userData: any };
   const { user } = useAuth();
 
+  // State management
   const [isMuted, setIsMuted] = useState(false);
   const [isVideoOff, setIsVideoOff] = useState(false);
   const [callDuration, setCallDuration] = useState(0);
@@ -35,11 +39,13 @@ const VideoCall = () => {
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
   const [isCaller, setIsCaller] = useState(false);
   const [callStatus, setCallStatus] = useState('Initializing...');
+  const [connectionState, setConnectionState] = useState('initializing');
 
+  // Refs
   const callTimerRef = useRef<NodeJS.Timeout | null>(null);
   const webRTCServiceRef = useRef<FirebaseWebRTCService | null>(null);
   const callIdRef = useRef<string>('');
-  const remoteStreamListenerRef = useRef<(() => void) | null>(null);
+   const incomingCallListenerRef = useRef<(() => void) | null>(null);
 
   // Initialize call
   useEffect(() => {
@@ -49,32 +55,48 @@ const VideoCall = () => {
         await requestPermissions();
 
         setCallStatus('Setting up connection...');
+        
+        // Generate call ID based on both user IDs
         const callId = generateCallId();
         callIdRef.current = callId;
 
-        const isCaller = await checkIfCaller(callId);
-        setIsCaller(isCaller);
-        setCallStatus(isCaller ? 'Calling...' : 'Incoming call...');
+        // Check if we're the caller or callee
+        const isCallerUser = await checkIfCaller(callId);
+        setIsCaller(isCallerUser);
+        
+        setCallStatus(isCallerUser ? 'Calling...' : 'Waiting for caller...');
 
-        const webRTCService = new FirebaseWebRTCService(callId, user!.uid);
+        // Create WebRTC service with callbacks
+        const webRTCService = new FirebaseWebRTCService(
+          callId,
+          user!.uid,
+          handleRemoteStream,
+          handleConnectionStateChange,
+          handleError
+        );
+        
         webRTCServiceRef.current = webRTCService;
 
-        await webRTCService.initialize();
+        // Initialize service
+        await webRTCService.initialize(isCallerUser);
 
+        // Get local stream
         setCallStatus('Accessing camera...');
         const stream = await getLocalStream();
         setLocalStream(stream);
         await webRTCService.addLocalStream(stream);
 
-        // Set up remote stream listener
-        setupRemoteStreamListener(webRTCService);
-
-        if (isCaller) {
+        // If caller, create offer. If callee, wait for offer
+        if (isCallerUser) {
           setCallStatus('Connecting...');
           await webRTCService.createOffer();
+          await sendCallNotification();
         } else {
-          listenForOffer(callId, webRTCService);
+          // Set up listener for incoming offer
+          setCallStatus('Waiting for call...');
+          await setupIncomingCallListener(callId, webRTCService);
         }
+
       } catch (error) {
         console.error('Error initializing call:', error);
         Alert.alert(
@@ -88,43 +110,116 @@ const VideoCall = () => {
     initializeCall();
 
     return () => {
+      // Cleanup incoming call listener
+      if (incomingCallListenerRef.current) {
+        incomingCallListenerRef.current();
+      }
       cleanup();
     };
   }, []);
 
-  const setupRemoteStreamListener = (webRTCService: FirebaseWebRTCService) => {
-    const interval = setInterval(() => {
-      const remoteStream = webRTCService.getRemoteStream();
-      if (remoteStream && remoteStream.getTracks().length > 0) {
-        setRemoteStream(remoteStream);
-        setCallStatus('Connected');
-        clearInterval(interval);
-      }
-    }, 1000);
 
-    // Cleanup function
-    remoteStreamListenerRef.current = () => clearInterval(interval);
+  // Set up listener for incoming calls (for callee)
+  const setupIncomingCallListener = async (callId: string, webRTCService: FirebaseWebRTCService) => {
+    try {
+      const callDocRef = firestore().collection('calls').doc(callId);
+      
+      // Listen for offers
+      const unsubscribe = callDocRef.collection('offers').onSnapshot((snapshot) => {
+        snapshot.docChanges().forEach(async (change) => {
+          if (change.type === 'added') {
+            const data = change.doc.data();
+            if (data.from !== user!.uid && data.offer) {
+              console.log('Received incoming call offer');
+              setCallStatus('Connecting to call...');
+              // The FirebaseWebRTCService should handle this automatically
+              // through its internal listeners
+            }
+          }
+        });
+      });
+      
+      incomingCallListenerRef.current = unsubscribe;
+    } catch (error) {
+      console.error('Error setting up incoming call listener:', error);
+    }
   };
 
+
+  // Add this function to VideoCall to send notification to callee
+  const sendCallNotification = async () => {
+    try {
+      await notificationService.sendCallNotification({
+        receiverId: userData.uid,
+        callerId: user!.uid,
+        callerName: userProfile?.name || 'User',
+        callerAvatar: userProfile?.profile_image,
+        callId: callIdRef.current,
+        callType: 'video',
+      });
+      console.log('Call notification sent to:', userData.name);
+    } catch (error) {
+      console.error('Error sending call notification:', error);
+    }
+  };
+
+  // Handle remote stream
+  const handleRemoteStream = (stream: MediaStream) => {
+    console.log('Remote stream received');
+    setRemoteStream(stream);
+    setCallStatus('Connected');
+  };
+
+  // Handle connection state changes
+  const handleConnectionStateChange = (state: string) => {
+    console.log('Connection state changed:', state);
+    setConnectionState(state);
+    
+    const statusMap: Record<string, string> = {
+      'new': 'Initializing...',
+      'connecting': 'Connecting...',
+      'connected': 'Connected',
+      'disconnected': 'Disconnected',
+      'failed': 'Connection Failed',
+      'closed': 'Call Ended',
+      'checking': 'Checking Connection...',
+      'completed': 'Connection Ready'
+    };
+    
+    const mappedStatus = statusMap[state] || state;
+    setCallStatus(mappedStatus);
+  };
+
+  // Handle errors
+  const handleError = (error: string) => {
+    console.error('WebRTC Error:', error);
+    Alert.alert('Call Error', error, [
+      {
+        text: 'End Call',
+        onPress: () => navigation.goBack()
+      }
+    ]);
+  };
+
+  // Cleanup function
   const cleanup = async () => {
-    if (remoteStreamListenerRef.current) {
-      remoteStreamListenerRef.current();
+    console.log('Cleaning up video call');
+    
+    if (callTimerRef.current) {
+      clearInterval(callTimerRef.current);
     }
 
     if (webRTCServiceRef.current) {
       await webRTCServiceRef.current.endCall();
     }
 
-    if (callTimerRef.current) {
-      clearInterval(callTimerRef.current);
-    }
-
-    // Stop local stream tracks
+    // Stop local stream
     if (localStream) {
       localStream.getTracks().forEach(track => track.stop());
     }
   };
 
+  // Request permissions
   const requestPermissions = async () => {
     if (Platform.OS === 'android') {
       const granted = await PermissionsAndroid.requestMultiple([
@@ -133,56 +228,40 @@ const VideoCall = () => {
       ]);
 
       if (
-        granted['android.permission.CAMERA'] !==
-          PermissionsAndroid.RESULTS.GRANTED ||
-        granted['android.permission.RECORD_AUDIO'] !==
-          PermissionsAndroid.RESULTS.GRANTED
+        granted['android.permission.CAMERA'] !== PermissionsAndroid.RESULTS.GRANTED ||
+        granted['android.permission.RECORD_AUDIO'] !== PermissionsAndroid.RESULTS.GRANTED
       ) {
         throw new Error('Camera and audio permissions required');
       }
     }
   };
 
+  // Generate unique call ID
   const generateCallId = (): string => {
     const userIds = [user!.uid, userData.uid].sort();
     return `call_${userIds.join('_')}_${Date.now()}`;
   };
 
+  // Check if current user is the caller
   const checkIfCaller = async (callId: string): Promise<boolean> => {
-    const callDoc = await firestore().collection('calls').doc(callId).get();
-    return !callDoc.exists;
+    try {
+      const callDoc = await firestore().collection('calls').doc(callId).get();
+      return !callDoc.exists;
+    } catch (error) {
+      console.error('Error checking caller status:', error);
+      return true; // Default to caller if error
+    }
   };
 
-  const listenForOffer = (
-    callId: string,
-    webRTCService: FirebaseWebRTCService,
-  ) => {
-    const callDoc = firestore().collection('calls').doc(callId);
-
-    const unsubscribe = callDoc.collection('offers').onSnapshot(snapshot => {
-      snapshot.docChanges().forEach(async change => {
-        if (change.type === 'added') {
-          const data = change.doc.data();
-          if (data.offer && data.from !== user!.uid) {
-            setCallStatus('Answering call...');
-            await webRTCService.createAnswer(data.offer);
-          }
-        }
-      });
-    });
-
-    // Store unsubscribe for cleanup
-    remoteStreamListenerRef.current = unsubscribe;
-  };
-
-  const getLocalStream = async () => {
+  // Get local media stream
+  const getLocalStream = async (): Promise<MediaStream> => {
     const constraints = {
       audio: true,
       video: {
         facingMode: 'user',
-        width: 640,
-        height: 480,
-        frameRate: 30,
+        width: { ideal: 1280 },
+        height: { ideal: 720 },
+        frameRate: { ideal: 30 }
       },
     };
 
@@ -195,9 +274,9 @@ const VideoCall = () => {
     }
   };
 
-  // Start call timer
+  // Timer for call duration
   useEffect(() => {
-    if (callActive && callStatus === 'Connected') {
+    if (callActive && connectionState === 'connected') {
       callTimerRef.current = setInterval(() => {
         setCallDuration(prev => prev + 1);
       }, 1000);
@@ -208,17 +287,16 @@ const VideoCall = () => {
         clearInterval(callTimerRef.current);
       }
     };
-  }, [callActive, callStatus]);
+  }, [callActive, connectionState]);
 
-  // Format call duration
+  // Format time display
   const formatTime = (seconds: number) => {
     const mins = Math.floor(seconds / 60);
     const secs = seconds % 60;
-    return `${mins.toString().padStart(2, '0')}:${secs
-      .toString()
-      .padStart(2, '0')}`;
+    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
 
+  // Toggle mute
   const toggleMute = () => {
     if (localStream) {
       const audioTracks = localStream.getAudioTracks();
@@ -229,6 +307,7 @@ const VideoCall = () => {
     setIsMuted(!isMuted);
   };
 
+  // Toggle video
   const toggleVideo = () => {
     if (localStream) {
       const videoTracks = localStream.getVideoTracks();
@@ -239,6 +318,7 @@ const VideoCall = () => {
     setIsVideoOff(!isVideoOff);
   };
 
+  // End call
   const endCall = async () => {
     Alert.alert('End Call', 'Are you sure you want to end this call?', [
       {
@@ -257,6 +337,7 @@ const VideoCall = () => {
     ]);
   };
 
+  // Switch camera
   const switchCamera = async () => {
     if (!localStream) return;
 
@@ -264,26 +345,31 @@ const VideoCall = () => {
     if (videoTracks.length > 0) {
       const track = videoTracks[0];
       const currentFacingMode = track.getSettings().facingMode;
-      const newFacingMode =
-        currentFacingMode === 'user' ? 'environment' : 'user';
-
-      track.stop();
+      const newFacingMode = currentFacingMode === 'user' ? 'environment' : 'user';
 
       try {
+        // Stop current track
+        track.stop();
+
+        // Get new stream
         const newStream = await mediaDevices.getUserMedia({
           audio: true,
           video: {
             facingMode: newFacingMode,
-            width: 640,
-            height: 480,
-            frameRate: 30,
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+            frameRate: { ideal: 30 }
           },
         });
 
+        // Update WebRTC connection
         if (webRTCServiceRef.current) {
           await webRTCServiceRef.current.addLocalStream(newStream);
         }
+
+        // Update local state
         setLocalStream(newStream);
+
       } catch (error) {
         console.error('Error switching camera:', error);
         Alert.alert('Error', 'Failed to switch camera');
@@ -293,26 +379,27 @@ const VideoCall = () => {
 
   return (
     <SafeAreaView style={styles.container}>
-      {/* Remote video display */}
-      <StatusBar barStyle="dark-content" backgroundColor="#000" />
-      {
-        remoteStream ? (
-          <RTCView
-            streamURL={remoteStream.toURL()}
-            style={styles.remoteVideo}
-            objectFit="cover"
-          />
-        ) : (
-          <View style={styles.remoteVideoPlaceholder}>
-            <View style={styles.avatarPlaceholder}>
-              <Text style={styles.avatarText}>{userData?.name?.[0] || 'U'}</Text>
-            </View>
-            <Text style={styles.remoteUserName}>{userData?.name || 'User'}</Text>
-            <Text style={styles.callStatusText}>{callStatus}</Text>
+      <StatusBar barStyle="light-content" backgroundColor="#000" />
+      
+      {/* Remote video or placeholder */}
+      {remoteStream ? (
+        <RTCView
+          streamURL={remoteStream.toURL()}
+          style={styles.remoteVideo}
+          objectFit="cover"
+        />
+      ) : (
+        <View style={styles.remoteVideoPlaceholder}>
+          <View style={styles.avatarPlaceholder}>
+            <Text style={styles.avatarText}>{userData?.name?.[0] || 'U'}</Text>
           </View>
-        )}
+          <Text style={styles.remoteUserName}>{userData?.name || 'User'}</Text>
+          <Text style={styles.callStatusText}>{callStatus}</Text>
+          <Text style={styles.connectionText}>Connection: {connectionState}</Text>
+        </View>
+      )}
 
-      {/* Local camera view */}
+      {/* Local camera preview */}
       <View style={styles.localCameraContainer}>
         {localStream && !isVideoOff ? (
           <RTCView
@@ -330,14 +417,13 @@ const VideoCall = () => {
         )}
       </View>
 
-      {/* Call info overlay */}
+      {/* Call information overlay */}
       <View style={styles.callInfoOverlay}>
-        {callStatus === 'Connected' && (
+        {connectionState === 'connected' && (
           <Text style={styles.callDuration}>{formatTime(callDuration)}</Text>
         )}
         <Text style={styles.callWithText}>
-          {isCaller ? 'Calling' : 'Incoming call from'}{' '}
-          {userData?.name || 'User'}
+          {isCaller ? 'Calling' : 'Incoming call from'} {userData?.name || 'User'}
         </Text>
       </View>
 
@@ -396,7 +482,6 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
   },
-
   avatarPlaceholder: {
     width: 120,
     height: 120,
@@ -417,7 +502,16 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     marginBottom: 8,
   },
-
+  callStatusText: {
+    fontSize: 16,
+    color: '#aaa',
+    marginTop: 10,
+  },
+  connectionText: {
+    fontSize: 14,
+    color: '#888',
+    marginTop: 5,
+  },
   localCameraContainer: {
     position: 'absolute',
     top: 60,
@@ -492,10 +586,5 @@ const styles = StyleSheet.create({
   },
   endCallButton: {
     backgroundColor: '#ff4444',
-  },
-  callStatusText: {
-    fontSize: 16,
-    color: '#aaa',
-    marginTop: 10,
   },
 });

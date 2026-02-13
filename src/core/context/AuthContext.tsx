@@ -1,7 +1,7 @@
 import React, { createContext, useContext, useEffect, useState, ReactNode } from 'react';
 import { getAuth, onAuthStateChanged } from '@react-native-firebase/auth';
 import firestore from '@react-native-firebase/firestore';
-import { notificationService } from '../services/notification.service';
+import messaging from '@react-native-firebase/messaging';
 
 // Define the complete user profile interface
 interface UserProfile {
@@ -10,7 +10,7 @@ interface UserProfile {
   email: string;
   profile_image?: string;
   online?: boolean;
-  // Add other fields as needed
+  fcmToken?: string;
 }
 
 interface AuthContextType {
@@ -27,31 +27,59 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   const [loading, setLoading] = useState(true);
   const auth = getAuth();
 
+  // Save FCM token to user profile
+  const saveTokenToUserProfile = async (userId: string, token: string) => {
+    try {
+      await firestore()
+        .collection('users')
+        .doc(userId)
+        .set(
+          { fcmToken: token },
+          { merge: true }
+        );
+      console.log('FCM token saved to user profile');
+    } catch (error) {
+      console.error('Error saving FCM token:', error);
+    }
+  };
+
+  // Main auth effect
   useEffect(() => {
+    let isMounted = true;
+    
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
+      if (!isMounted) return;
+      
       setUser(firebaseUser);
       
       if (firebaseUser) {
         // Initialize notifications for authenticated user
         try {
           // Request notification permissions
-          const permissionGranted = await notificationService.requestPermission();
+          const authStatus = await messaging().requestPermission();
+          const enabled =
+            authStatus === messaging.AuthorizationStatus.AUTHORIZED ||
+            authStatus === messaging.AuthorizationStatus.PROVISIONAL;
           
-          if (permissionGranted) {
+          if (enabled) {
             // Get FCM token
-            const fcmToken = await notificationService.getToken();
+            const fcmToken = await messaging().getToken();
             
-            if (fcmToken) {
+            if (fcmToken && isMounted) {
               // Save token to user profile
-              await notificationService.saveTokenToUserProfile(firebaseUser.uid, fcmToken);
+              await saveTokenToUserProfile(firebaseUser.uid, fcmToken);
             }
           }
         } catch (error) {
           console.error('Error initializing notifications:', error);
         }
+        
         try {
           // Fetch user profile from Firestore
           const userDoc = await firestore().collection('users').doc(firebaseUser.uid).get();
+          
+          if (!isMounted) return;
+          
           if (userDoc.exists) {
             const userData = userDoc.data();
             setUserProfile({
@@ -59,7 +87,8 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
               name: userData?.name || firebaseUser.displayName || 'User',
               email: userData?.email || firebaseUser.email || '',
               profile_image: userData?.profile_image || firebaseUser.photoURL || '',
-              online: userData?.online || false,
+              online: true,
+              fcmToken: userData?.fcmToken,
             });
           } else {
             // If user document doesn't exist, create minimal profile
@@ -68,67 +97,36 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
               name: firebaseUser.displayName || 'User',
               email: firebaseUser.email || '',
               profile_image: firebaseUser.photoURL || '',
-              online: false,
+              online: true,
             });
           }
         } catch (error) {
           console.error('Error fetching user profile:', error);
-          // Fallback to basic Firebase user data
-          setUserProfile({
-            uid: firebaseUser.uid,
-            name: firebaseUser.displayName || 'User',
-            email: firebaseUser.email || '',
-            profile_image: firebaseUser.photoURL || '',
-            online: false,
-          });
+          if (isMounted) {
+            // Fallback to basic Firebase user data
+            setUserProfile({
+              uid: firebaseUser.uid,
+              name: firebaseUser.displayName || 'User',
+              email: firebaseUser.email || '',
+              profile_image: firebaseUser.photoURL || '',
+              online: true,
+            });
+          }
         }
       } else {
-        setUserProfile(null);
+        if (isMounted) {
+          setUserProfile(null);
+        }
       }
       
-      setLoading(false);
-    });
-
-    return unsubscribe;
-  }, []);
-
-  // Handle foreground messages
-  useEffect(() => {
-    const unsubscribe = notificationService.onForegroundMessage(remoteMessage => {
-      console.log('Foreground message received:', remoteMessage);
-      // Handle incoming message - show in-app notification, update UI, etc.
-      // You can use react-native-toast-message or custom notification component
-    });
-
-    return unsubscribe;
-  }, []);
-
-  // Handle background messages
-  useEffect(() => {
-    notificationService.onBackgroundMessage(async remoteMessage => {
-      console.log('Background message received:', remoteMessage);
-      // Handle background message processing
-      // This runs when app is in background/killed
-      return Promise.resolve();
-    });
-  }, []);
-
-  // Handle notification opened app
-  useEffect(() => {
-    let unsubscribe: (() => void) | null = null;
-    
-    notificationService.handleNotificationOpenedApp(remoteMessage => {
-      console.log('App opened from notification:', remoteMessage);
-      // Navigate to appropriate screen based on notification data
-      // For example, navigate to chat screen if it's a message notification
-    }).then(unsub => {
-      unsubscribe = unsub;
+      if (isMounted) {
+        setLoading(false);
+      }
     });
 
     return () => {
-      if (unsubscribe) {
-        unsubscribe();
-      }
+      isMounted = false;
+      unsubscribe();
     };
   }, []);
 
