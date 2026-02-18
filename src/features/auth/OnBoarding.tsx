@@ -19,11 +19,13 @@ const OnBoarding = () => {
   const { width, height } = useWindowDimensions();
 
   const handleSignUp = () => {
-    navigation.navigate('Auth' as never);
+    // @ts-ignore - navigating to Auth navigator
+    navigation.navigate('Auth');
   };
 
   const handleLogin = () => {
-    navigation.navigate('Auth' as never, { screen: 'Signin' as never });
+    // @ts-ignore - navigating to nested navigator
+    navigation.navigate('Auth', { screen: 'Signin' });
   };
 
   // Responsive calculations
@@ -94,6 +96,8 @@ const OnBoarding = () => {
               title="Sign up with mail"
               backgroundColor="#FFF"
               onPress={handleSignUp}
+              style={undefined}
+              textStyle={undefined}
             />
 
           {/* Login */}

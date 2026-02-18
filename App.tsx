@@ -1,5 +1,5 @@
 import { StyleSheet, Text, View } from 'react-native';
-import React from 'react';
+import React, { useEffect } from 'react';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { NavigationContainer, NavigationContainerRef } from '@react-navigation/native';
@@ -9,17 +9,27 @@ import { AuthProvider } from './src/core/context/AuthContext';
 import Toast from 'react-native-toast-message';
 import CustomToast from './src/shared/components/CustomToast';
 import NotificationHandler from './src/shared/components/NotificationHandler';
-
-export const navigationRef = React.createRef<NavigationContainerRef>();
+import { notificationService } from './src/core/services/notification.service';
 
 // Define the root stack parameter list
 export type RootStackParamList = {
   AppNav: undefined;
+  IncomingCall: { callId: string; callerId: string; callerName: string; callerAvatar?: string; type?: 'video' | 'audio' };
+  VideoCall: { userData: { uid: string; name: string; profile_image?: string } };
 };
+
+export const navigationRef = React.createRef<NavigationContainerRef<RootStackParamList>>();
 
 const Stack = createNativeStackNavigator();
 
 const App = () => {
+  useEffect(() => {
+    // Set the navigation reference for the notification service
+    if (navigationRef.current) {
+      notificationService.setNavigationRef(navigationRef.current);
+    }
+  }, []);
+
   return (
     <AuthProvider>
       <GestureHandlerRootView style={{ flex: 1 }}>
@@ -33,9 +43,9 @@ const App = () => {
             <Stack.Navigator screenOptions={{ headerShown: false }}>
               <Stack.Screen name="AppNav" component={AppNavigator} />
             </Stack.Navigator>
-            <NotificationHandler />
           </SafeAreaProvider>
         </NavigationContainer>
+        <NotificationHandler />
         <Toast config={{
           success: (props) => <CustomToast {...props} type="success" />,
           error: (props) => <CustomToast {...props} type="error" />,

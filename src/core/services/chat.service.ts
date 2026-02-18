@@ -139,7 +139,7 @@ class ChatService {
       
       try {
         const senderDoc = await this.firestore.collection('users').doc(senderId).get();
-        const senderName = senderDoc.exists ? senderDoc.data()?.name || 'Someone' : 'Someone';
+        const senderName = senderDoc.exists() ? senderDoc.data()?.name || 'Someone' : 'Someone';
         
         await notificationService.sendNotificationToUser(receiverId, {
           title: 'New Message',

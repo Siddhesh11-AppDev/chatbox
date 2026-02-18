@@ -56,7 +56,7 @@ const StoryCreator = () => {
   const handleSelectFromGallery = () => {
     const options = {
       mediaType: 'photo' as const,
-      quality: 0.8,
+      quality: 0.8 as const,
       selectionLimit: 1,
     };
 
@@ -89,9 +89,9 @@ const StoryCreator = () => {
 
     const options = {
       mediaType: 'photo' as const,
-      quality: 0.8,
+      quality: 0.8 as const,
       saveToPhotos: true,
-      cameraType: 'back', // Use back camera
+      cameraType: 'back' as const, // Use back camera
     };
 
     console.log('Launching camera with options:', options);

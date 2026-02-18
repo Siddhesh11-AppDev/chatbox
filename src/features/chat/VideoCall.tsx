@@ -1,14 +1,19 @@
-import React, { useState, useEffect, useRef } from 'react';
+ 
+
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   View,
   Text,
   StyleSheet,
   TouchableOpacity,
+  TouchableWithoutFeedback,
   Alert,
   Dimensions,
   PermissionsAndroid,
   Platform,
   StatusBar,
+  Animated,
+  PanResponder,
 } from 'react-native';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { RTCView, mediaDevices, MediaStream } from 'react-native-webrtc';
@@ -20,571 +25,697 @@ import firestore from '@react-native-firebase/firestore';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { notificationService } from '../../core/services/notification.service';
 
-
+let InCallManager: any = null;
+try {
+  InCallManager = require('react-native-incall-manager').default;
+} catch (_) {}
 
 const { width, height } = Dimensions.get('window');
 
-const VideoCall = () => {
-  const navigation = useNavigation();
-  const route = useRoute();
-  const { userData } = route.params as { userData: any };
-  const { user } = useAuth();
+const PIP_W = 110;
+const PIP_H = 150;
+const PIP_MARGIN = 16;
+const PIP_INIT_X = width - PIP_W - PIP_MARGIN;
+const PIP_INIT_Y = 80;
 
-  // State management
-  const [isMuted, setIsMuted] = useState(false);
-  const [isVideoOff, setIsVideoOff] = useState(false);
-  const [callDuration, setCallDuration] = useState(0);
-  const [callActive, setCallActive] = useState(true);
+type ConnectionState =
+  | 'initializing'
+  | 'new'
+  | 'checking'
+  | 'connecting'
+  | 'connected'
+  | 'disconnected'
+  | 'failed'
+  | 'closed';
+
+const STATUS_LABEL: Record<string, string> = {
+  initializing: 'Initializing call…',
+  new: 'Setting up connection…',
+  checking: 'Checking connection…',
+  connecting: 'Connecting to peer…',
+  connected: '',
+  disconnected: 'Reconnecting…',
+  failed: 'Connection failed',
+  closed: 'Call ended',
+  calling: 'Calling…',
+  receiving: 'Receiving call…',
+  answer_sent: 'Answer sent, connecting…',
+  answer_received: 'Answer received, connecting…',
+};
+
+const VideoCall = () => {
+  const navigation = useNavigation<any>();
+  const route = useRoute();
+  const {
+    userData,
+    isIncomingCall,
+    callId: incomingCallId,
+  } = route.params as {
+    userData: { uid: string; name: string; profile_image?: string };
+    isIncomingCall?: boolean;
+    callId?: string;
+  };
+  const { user, userProfile } = useAuth();
+
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
-  const [isCaller, setIsCaller] = useState(false);
-  const [callStatus, setCallStatus] = useState('Initializing...');
-  const [connectionState, setConnectionState] = useState('initializing');
+  const [isMuted, setIsMuted] = useState(false);
+  const [isVideoOff, setIsVideoOff] = useState(false);
+  const [isSpeaker, setIsSpeaker] = useState(true);
+  const [isFrontCamera, setIsFrontCamera] = useState(true);
+  const [connectionState, setConnectionState] =
+    useState<ConnectionState>('initializing');
+  const [callStatus, setCallStatus] = useState('initializing');
+  const [callDuration, setCallDuration] = useState(0);
+  const [controlsVisible, setControlsVisible] = useState(true);
 
-  // Refs
-  const callTimerRef = useRef<NodeJS.Timeout | null>(null);
   const webRTCServiceRef = useRef<FirebaseWebRTCService | null>(null);
-  const callIdRef = useRef<string>('');
-   const incomingCallListenerRef = useRef<(() => void) | null>(null);
+  const callIdRef = useRef('');
+  const isCallerRef = useRef(false);
+  const localStreamRef = useRef<MediaStream | null>(null);
+  const callTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const controlsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const controlsOpacity = useRef(new Animated.Value(1)).current;
 
-  // Initialize call
+  // Holds an offer that arrived before the PC + stream were ready (callee race)
+  const pendingOfferRef = useRef<any>(null);
+  const readyToAnswerRef = useRef(false); // true once addLocalStream() done
+
+  // ── PiP drag ─────────────────────────────────────────────────────────
+  const pipPan = useRef(
+    new Animated.ValueXY({ x: PIP_INIT_X, y: PIP_INIT_Y }),
+  ).current;
+  const pipPanResponder = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onPanResponderGrant: () => {
+        pipPan.setOffset({
+          x: (pipPan.x as any)._value,
+          y: (pipPan.y as any)._value,
+        });
+      },
+      onPanResponderMove: Animated.event(
+        [null, { dx: pipPan.x, dy: pipPan.y }],
+        { useNativeDriver: false },
+      ),
+      onPanResponderRelease: () => {
+        pipPan.flattenOffset();
+        const cx = (pipPan.x as any)._value;
+        const cy = (pipPan.y as any)._value;
+        Animated.spring(pipPan, {
+          toValue: {
+            x: cx < width / 2 ? PIP_MARGIN : width - PIP_W - PIP_MARGIN,
+            y: Math.max(PIP_MARGIN, Math.min(cy, height - PIP_H - 120)),
+          },
+          useNativeDriver: false,
+          tension: 80,
+          friction: 8,
+        }).start();
+      },
+    }),
+  ).current;
+
+  // ── Controls visibility ───────────────────────────────────────────────
+  const showControls = useCallback(() => {
+    if (controlsTimerRef.current) clearTimeout(controlsTimerRef.current);
+    setControlsVisible(true);
+    Animated.timing(controlsOpacity, {
+      toValue: 1,
+      duration: 200,
+      useNativeDriver: true,
+    }).start();
+    if (connectionState === 'connected') {
+      controlsTimerRef.current = setTimeout(() => {
+        Animated.timing(controlsOpacity, {
+          toValue: 0,
+          duration: 400,
+          useNativeDriver: true,
+        }).start(() => setControlsVisible(false));
+      }, 4000);
+    }
+  }, [connectionState]);
+
   useEffect(() => {
-    const initializeCall = async () => {
+    if (connectionState === 'connected') {
+      showControls();
+    } else {
+      if (controlsTimerRef.current) clearTimeout(controlsTimerRef.current);
+      setControlsVisible(true);
+      Animated.timing(controlsOpacity, {
+        toValue: 1,
+        duration: 200,
+        useNativeDriver: true,
+      }).start();
+    }
+  }, [connectionState]);
+
+  // ── INIT ─────────────────────────────────────────────────────────────
+  useEffect(() => {
+    let cancelled = false;
+
+    const init = async () => {
       try {
-        setCallStatus('Requesting permissions...');
         await requestPermissions();
 
-        setCallStatus('Setting up connection...');
-        
-        // Generate call ID based on both user IDs
-        const callId = generateCallId();
+        const callId =
+          isIncomingCall && incomingCallId ? incomingCallId : generateCallId();
         callIdRef.current = callId;
 
-        // Check if we're the caller or callee
-        const isCallerUser = await checkIfCaller(callId);
-        setIsCaller(isCallerUser);
-        
-        setCallStatus(isCallerUser ? 'Calling...' : 'Waiting for caller...');
+        const isCaller = isIncomingCall ? false : await checkIfCaller(callId);
+        isCallerRef.current = isCaller;
 
-        // Create WebRTC service with callbacks
-        const webRTCService = new FirebaseWebRTCService(
+        // Build service — pass handleOfferReceived for callee, undefined for caller
+        const service = new FirebaseWebRTCService(
           callId,
           user!.uid,
-          handleRemoteStream,
-          handleConnectionStateChange,
-          handleError
+          (stream: MediaStream) => {
+            if (!cancelled) {
+              console.log('VideoCall: Remote stream received');
+              console.log('VideoCall: Stream tracks:', stream.getTracks().map(t => t.kind));
+              setRemoteStream(stream);
+              console.log('VideoCall: Remote stream set successfully');
+            }
+          },
+          (state: string) => {
+            if (!cancelled) {
+              console.log('VideoCall: Connection state changed to:', state);
+              setConnectionState(state as ConnectionState);
+              // Update call status based on connection state
+              if (state === 'connected') {
+                setCallStatus('connected');
+                console.log('VideoCall: Call connected successfully');
+              } else if (state === 'failed' || state === 'disconnected') {
+                setCallStatus(state);
+                console.log('VideoCall: Connection issue:', state);
+              } else if (state === 'connecting' || state === 'checking') {
+                setCallStatus('connecting');
+              }
+            }
+          },
+          (err: string) => {
+            if (!cancelled) handleError(err);
+          },
+          isCaller ? undefined : handleOfferReceived,
         );
-        
-        webRTCServiceRef.current = webRTCService;
+        webRTCServiceRef.current = service;
 
-        // Initialize service
-        await webRTCService.initialize(isCallerUser);
+        // Initialize (builds PC + Firestore listeners)
+        await service.initialize(isCaller);
 
-        // Get local stream
-        setCallStatus('Accessing camera...');
+        // Get camera/mic
         const stream = await getLocalStream();
+        if (cancelled) {
+          stream.getTracks().forEach(t => t.stop());
+          return;
+        }
+        localStreamRef.current = stream;
         setLocalStream(stream);
-        await webRTCService.addLocalStream(stream);
+        await service.addLocalStream(stream);
 
-        // If caller, create offer. If callee, wait for offer
-        if (isCallerUser) {
-          setCallStatus('Connecting...');
-          await webRTCService.createOffer();
-          await sendCallNotification();
-        } else {
-          // Set up listener for incoming offer
-          setCallStatus('Waiting for call...');
-          await setupIncomingCallListener(callId, webRTCService);
+        // ✅ Mark ready — if offer arrived while we were setting up, process it now
+        readyToAnswerRef.current = true;
+        if (!isCaller && pendingOfferRef.current) {
+          console.log('Processing queued offer');
+          await service.handleRemoteOffer(pendingOfferRef.current);
+          pendingOfferRef.current = null;
         }
 
-      } catch (error) {
-        console.error('Error initializing call:', error);
-        Alert.alert(
-          'Error',
-          'Failed to initialize video call: ' + (error as Error).message,
-        );
-        navigation.goBack();
+        if (InCallManager) {
+          InCallManager.start({ media: 'video' });
+          InCallManager.setForceSpeakerphoneOn(true);
+        }
+
+        if (isCaller) {
+          setCallStatus('calling');
+          await service.createOffer();
+          await sendCallNotification(callId);
+        } else {
+          setCallStatus('receiving');
+        }
+      } catch (err) {
+        if (!cancelled) {
+          console.error('Call init error:', err);
+          Alert.alert(
+            'Error',
+            'Could not start call: ' + (err as Error).message,
+          );
+          navigation.goBack();
+        }
       }
     };
 
-    initializeCall();
-
+    init();
     return () => {
-      // Cleanup incoming call listener
-      if (incomingCallListenerRef.current) {
-        incomingCallListenerRef.current();
-      }
-      cleanup();
+      cancelled = true;
+      doCleanup();
     };
   }, []);
 
-
-  // Set up listener for incoming calls (for callee)
-  const setupIncomingCallListener = async (callId: string, webRTCService: FirebaseWebRTCService) => {
-    try {
-      const callDocRef = firestore().collection('calls').doc(callId);
-      
-      // Listen for offers
-      const unsubscribe = callDocRef.collection('offers').onSnapshot((snapshot) => {
-        snapshot.docChanges().forEach(async (change) => {
-          if (change.type === 'added') {
-            const data = change.doc.data();
-            if (data.from !== user!.uid && data.offer) {
-              console.log('Received incoming call offer');
-              setCallStatus('Connecting to call...');
-              // The FirebaseWebRTCService should handle this automatically
-              // through its internal listeners
-            }
-          }
-        });
-      });
-      
-      incomingCallListenerRef.current = unsubscribe;
-    } catch (error) {
-      console.error('Error setting up incoming call listener:', error);
-    }
-  };
-
-
-  // Add this function to VideoCall to send notification to callee
-  const sendCallNotification = async () => {
-    try {
-      await notificationService.sendCallNotification({
-        receiverId: userData.uid,
-        callerId: user!.uid,
-        callerName: userProfile?.name || 'User',
-        callerAvatar: userProfile?.profile_image,
-        callId: callIdRef.current,
-        callType: 'video',
-      });
-      console.log('Call notification sent to:', userData.name);
-    } catch (error) {
-      console.error('Error sending call notification:', error);
-    }
-  };
-
-  // Handle remote stream
-  const handleRemoteStream = (stream: MediaStream) => {
-    console.log('Remote stream received');
-    setRemoteStream(stream);
-    setCallStatus('Connected');
-  };
-
-  // Handle connection state changes
-  const handleConnectionStateChange = (state: string) => {
-    console.log('Connection state changed:', state);
-    setConnectionState(state);
-    
-    const statusMap: Record<string, string> = {
-      'new': 'Initializing...',
-      'connecting': 'Connecting...',
-      'connected': 'Connected',
-      'disconnected': 'Disconnected',
-      'failed': 'Connection Failed',
-      'closed': 'Call Ended',
-      'checking': 'Checking Connection...',
-      'completed': 'Connection Ready'
-    };
-    
-    const mappedStatus = statusMap[state] || state;
-    setCallStatus(mappedStatus);
-  };
-
-  // Handle errors
-  const handleError = (error: string) => {
-    console.error('WebRTC Error:', error);
-    Alert.alert('Call Error', error, [
-      {
-        text: 'End Call',
-        onPress: () => navigation.goBack()
+  // ── Duration timer ────────────────────────────────────────────────────
+  useEffect(() => {
+    if (connectionState === 'connected') {
+      callTimerRef.current = setInterval(
+        () => setCallDuration(d => d + 1),
+        1000,
+      );
+      if (InCallManager) InCallManager.setForceSpeakerphoneOn(true);
+    } else {
+      if (callTimerRef.current) {
+        clearInterval(callTimerRef.current);
+        callTimerRef.current = null;
       }
-    ]);
+    }
+    return () => {
+      if (callTimerRef.current) clearInterval(callTimerRef.current);
+    };
+  }, [connectionState]);
+
+  // ── Offer handler (callee) ────────────────────────────────────────────
+  // ✅ KEY FIX: if called before PC + stream are ready, queue it.
+  const handleOfferReceived = async (offerData: any) => {
+    if (!readyToAnswerRef.current) {
+      // PC or stream not ready yet — queue and process after addLocalStream()
+      console.log('Offer arrived early — queuing');
+      pendingOfferRef.current = offerData.offer;
+      return;
+    }
+    try {
+      await webRTCServiceRef.current?.handleRemoteOffer(offerData.offer);
+    } catch (err) {
+      handleError('Failed to connect to call');
+    }
   };
 
-  // Cleanup function
-  const cleanup = async () => {
-    console.log('Cleaning up video call');
-    
-    if (callTimerRef.current) {
-      clearInterval(callTimerRef.current);
+  const handleError = (error: string) => {
+    if (!error.includes('disconnected') && !error.includes('closed')) {
+      Alert.alert('Call Error', error, [
+        { text: 'End Call', onPress: () => navigation.goBack() },
+      ]);
     }
+  };
+
+  // ── Cleanup ───────────────────────────────────────────────────────────
+  const doCleanup = async () => {
+    if (controlsTimerRef.current) clearTimeout(controlsTimerRef.current);
+    if (callTimerRef.current) clearInterval(callTimerRef.current);
+    if (InCallManager) InCallManager.stop();
 
     if (webRTCServiceRef.current) {
       await webRTCServiceRef.current.endCall();
+      webRTCServiceRef.current = null;
     }
-
-    // Stop local stream
-    if (localStream) {
-      localStream.getTracks().forEach(track => track.stop());
+    if (localStreamRef.current) {
+      localStreamRef.current.getTracks().forEach(t => t.stop());
+      localStreamRef.current = null;
+    }
+    if (!isCallerRef.current && callIdRef.current && user) {
+      try {
+        await notificationService.clearIncomingCall(user.uid);
+        await notificationService.cancelCallNotification(
+          callIdRef.current,
+          user.uid,
+        );
+      } catch (_) {}
     }
   };
 
-  // Request permissions
+  const endCall = async () => {
+    await doCleanup();
+    navigation.goBack();
+  };
+
+  // ── Controls ──────────────────────────────────────────────────────────
+  const toggleMute = () => {
+    localStreamRef.current?.getAudioTracks().forEach(t => {
+      t.enabled = !t.enabled;
+    });
+    setIsMuted(m => !m);
+  };
+
+  const toggleVideo = () => {
+    localStreamRef.current?.getVideoTracks().forEach(t => {
+      t.enabled = !t.enabled;
+    });
+    setIsVideoOff(v => !v);
+  };
+
+  const toggleSpeaker = () => {
+    if (InCallManager) {
+      const next = !isSpeaker;
+      InCallManager.setForceSpeakerphoneOn(next);
+      setIsSpeaker(next);
+    }
+  };
+
+  const switchCamera = () => {
+    const track = localStreamRef.current?.getVideoTracks()[0] as any;
+    if (track?._switchCamera) {
+      track._switchCamera();
+      setIsFrontCamera(f => !f);
+    }
+  };
+
+  // ── Helpers ───────────────────────────────────────────────────────────
   const requestPermissions = async () => {
     if (Platform.OS === 'android') {
-      const granted = await PermissionsAndroid.requestMultiple([
+      const r = await PermissionsAndroid.requestMultiple([
         PermissionsAndroid.PERMISSIONS.CAMERA,
         PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
       ]);
-
       if (
-        granted['android.permission.CAMERA'] !== PermissionsAndroid.RESULTS.GRANTED ||
-        granted['android.permission.RECORD_AUDIO'] !== PermissionsAndroid.RESULTS.GRANTED
-      ) {
-        throw new Error('Camera and audio permissions required');
-      }
+        r['android.permission.CAMERA'] !== 'granted' ||
+        r['android.permission.RECORD_AUDIO'] !== 'granted'
+      )
+        throw new Error('Camera and microphone permissions are required.');
     }
   };
 
-  // Generate unique call ID
-  const generateCallId = (): string => {
-    const userIds = [user!.uid, userData.uid].sort();
-    return `call_${userIds.join('_')}_${Date.now()}`;
+  const generateCallId = () => {
+    const ids = [user!.uid, userData.uid].sort();
+    return `call_${ids.join('_')}_${Date.now()}`;
   };
 
-  // Check if current user is the caller
   const checkIfCaller = async (callId: string): Promise<boolean> => {
     try {
-      const callDoc = await firestore().collection('calls').doc(callId).get();
-      return !callDoc.exists;
-    } catch (error) {
-      console.error('Error checking caller status:', error);
-      return true; // Default to caller if error
+      const d = await firestore().collection('calls').doc(callId).get();
+      return !d.exists;
+    } catch {
+      return true;
     }
   };
 
-  // Get local media stream
   const getLocalStream = async (): Promise<MediaStream> => {
-    const constraints = {
+    const s = await mediaDevices.getUserMedia({
       audio: true,
       video: {
         facingMode: 'user',
         width: { ideal: 1280 },
         height: { ideal: 720 },
-        frameRate: { ideal: 30 }
+        frameRate: { ideal: 30 },
       },
-    };
-
-    try {
-      const stream = await mediaDevices.getUserMedia(constraints);
-      return stream;
-    } catch (error) {
-      console.error('Error getting local stream:', error);
-      throw new Error('Failed to access camera and microphone');
-    }
+    });
+    return s as unknown as MediaStream;
   };
 
-  // Timer for call duration
-  useEffect(() => {
-    if (callActive && connectionState === 'connected') {
-      callTimerRef.current = setInterval(() => {
-        setCallDuration(prev => prev + 1);
-      }, 1000);
-    }
-
-    return () => {
-      if (callTimerRef.current) {
-        clearInterval(callTimerRef.current);
-      }
-    };
-  }, [callActive, connectionState]);
-
-  // Format time display
-  const formatTime = (seconds: number) => {
-    const mins = Math.floor(seconds / 60);
-    const secs = seconds % 60;
-    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+  const sendCallNotification = async (callId: string) => {
+    const callerName =
+      userProfile?.name || user?.displayName || user?.email || 'User';
+    await notificationService.sendCallNotification({
+      receiverId: userData.uid,
+      callerId: user!.uid,
+      callerName,
+      callerAvatar: userProfile?.profile_image,
+      callId,
+      callType: 'video',
+    });
   };
 
-  // Toggle mute
-  const toggleMute = () => {
-    if (localStream) {
-      const audioTracks = localStream.getAudioTracks();
-      audioTracks.forEach(track => {
-        track.enabled = !track.enabled;
-      });
-    }
-    setIsMuted(!isMuted);
-  };
+  const formatTime = (s: number) =>
+    `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(
+      2,
+      '0',
+    )}`;
 
-  // Toggle video
-  const toggleVideo = () => {
-    if (localStream) {
-      const videoTracks = localStream.getVideoTracks();
-      videoTracks.forEach(track => {
-        track.enabled = !track.enabled;
-      });
-    }
-    setIsVideoOff(!isVideoOff);
-  };
-
-  // End call
-  const endCall = async () => {
-    Alert.alert('End Call', 'Are you sure you want to end this call?', [
-      {
-        text: 'Cancel',
-        style: 'cancel',
-      },
-      {
-        text: 'End Call',
-        style: 'destructive',
-        onPress: async () => {
-          setCallActive(false);
-          await cleanup();
-          navigation.goBack();
-        },
-      },
-    ]);
-  };
-
-  // Switch camera
-  const switchCamera = async () => {
-    if (!localStream) return;
-
-    const videoTracks = localStream.getVideoTracks();
-    if (videoTracks.length > 0) {
-      const track = videoTracks[0];
-      const currentFacingMode = track.getSettings().facingMode;
-      const newFacingMode = currentFacingMode === 'user' ? 'environment' : 'user';
-
-      try {
-        // Stop current track
-        track.stop();
-
-        // Get new stream
-        const newStream = await mediaDevices.getUserMedia({
-          audio: true,
-          video: {
-            facingMode: newFacingMode,
-            width: { ideal: 1280 },
-            height: { ideal: 720 },
-            frameRate: { ideal: 30 }
-          },
-        });
-
-        // Update WebRTC connection
-        if (webRTCServiceRef.current) {
-          await webRTCServiceRef.current.addLocalStream(newStream);
-        }
-
-        // Update local state
-        setLocalStream(newStream);
-
-      } catch (error) {
-        console.error('Error switching camera:', error);
-        Alert.alert('Error', 'Failed to switch camera');
-      }
-    }
-  };
+  // ── Render ────────────────────────────────────────────────────────────
+  const statusLabel = STATUS_LABEL[connectionState] ?? connectionState;
+  const isConnected = connectionState === 'connected';
 
   return (
-    <SafeAreaView style={styles.container}>
-      <StatusBar barStyle="light-content" backgroundColor="#000" />
-      
-      {/* Remote video or placeholder */}
-      {remoteStream ? (
-        <RTCView
-          streamURL={remoteStream.toURL()}
-          style={styles.remoteVideo}
-          objectFit="cover"
-        />
-      ) : (
-        <View style={styles.remoteVideoPlaceholder}>
-          <View style={styles.avatarPlaceholder}>
-            <Text style={styles.avatarText}>{userData?.name?.[0] || 'U'}</Text>
-          </View>
-          <Text style={styles.remoteUserName}>{userData?.name || 'User'}</Text>
-          <Text style={styles.callStatusText}>{callStatus}</Text>
-          <Text style={styles.connectionText}>Connection: {connectionState}</Text>
-        </View>
-      )}
+    <TouchableWithoutFeedback onPress={showControls}>
+      <View style={styles.root}>
+        <StatusBar hidden />
 
-      {/* Local camera preview */}
-      <View style={styles.localCameraContainer}>
-        {localStream && !isVideoOff ? (
+        {/* Remote */}
+        {remoteStream ? (
           <RTCView
-            streamURL={localStream.toURL()}
-            style={styles.localCamera}
+            streamURL={remoteStream.toURL()}
+            style={styles.remoteVideo}
             objectFit="cover"
-            mirror={true}
           />
         ) : (
-          <View style={[styles.localCamera, styles.videoOffPlaceholder]}>
-            <View style={styles.localAvatar}>
-              <Text style={styles.localAvatarText}>You</Text>
+          <View style={styles.remotePlaceholder}>
+            <View style={styles.avatarCircle}>
+              <Text style={styles.avatarLetter}>
+                {(userData?.name?.[0] ?? 'U').toUpperCase()}
+              </Text>
             </View>
+            <Text style={styles.remoteNameText}>
+              {userData?.name ?? 'User'}
+            </Text>
+            <Text style={styles.statusLabel}>{statusLabel}</Text>
           </View>
         )}
-      </View>
 
-      {/* Call information overlay */}
-      <View style={styles.callInfoOverlay}>
-        {connectionState === 'connected' && (
-          <Text style={styles.callDuration}>{formatTime(callDuration)}</Text>
+        {/* Top bar */}
+        <Animated.View style={[styles.topBar, { opacity: controlsOpacity }]}>
+          <Text style={styles.remoteName}>{userData?.name ?? 'User'}</Text>
+          <Text style={styles.duration}>
+            {isConnected ? formatTime(callDuration) : statusLabel}
+          </Text>
+        </Animated.View>
+
+        {/* PiP */}
+        <Animated.View
+          style={[
+            styles.pipContainer,
+            { transform: pipPan.getTranslateTransform() },
+          ]}
+          {...pipPanResponder.panHandlers}
+        >
+          {localStream && !isVideoOff ? (
+            <RTCView
+              streamURL={localStream.toURL()}
+              style={styles.pipVideo}
+              objectFit="cover"
+              mirror={isFrontCamera}
+            />
+          ) : (
+            <View style={[styles.pipVideo, styles.pipPlaceholder]}>
+              <Text style={styles.pipPlaceholderText}>
+                {isVideoOff ? '📷' : '⏳'}
+              </Text>
+            </View>
+          )}
+        </Animated.View>
+
+        {/* Controls */}
+        {controlsVisible && (
+          <Animated.View
+            style={[styles.controls, { opacity: controlsOpacity }]}
+          >
+            <View style={styles.controlRow}>
+              <ControlBtn
+                icon={isSpeaker ? 'volume-2' : 'volume-x'}
+                label={isSpeaker ? 'Speaker' : 'Earpiece'}
+                onPress={toggleSpeaker}
+                active={isSpeaker}
+              />
+              <ControlBtn
+                icon={isVideoOff ? 'video-off' : 'video'}
+                label={isVideoOff ? 'Start video' : 'Stop video'}
+                onPress={toggleVideo}
+                danger={isVideoOff}
+              />
+              <ControlBtn
+                icon="repeat"
+                label="Flip"
+                onPress={switchCamera}
+                iconComponent={MaterialIcons}
+                iconName="flip-camera-android"
+              />
+            </View>
+            <View style={styles.controlRow}>
+              <ControlBtn
+                icon={isMuted ? 'mic-off' : 'mic'}
+                label={isMuted ? 'Unmute' : 'Mute'}
+                onPress={toggleMute}
+                danger={isMuted}
+              />
+              <TouchableOpacity
+                style={styles.endCallBtn}
+                onPress={endCall}
+                activeOpacity={0.8}
+              >
+                <Feather name="phone-off" size={28} color="#fff" />
+              </TouchableOpacity>
+              <View style={styles.controlBtnPlaceholder} />
+            </View>
+          </Animated.View>
         )}
-        <Text style={styles.callWithText}>
-          {isCaller ? 'Calling' : 'Incoming call from'} {userData?.name || 'User'}
-        </Text>
       </View>
-
-      {/* Control buttons */}
-      <View style={styles.controlsContainer}>
-        <TouchableOpacity
-          style={[styles.controlButton, isMuted && styles.activeControl]}
-          onPress={toggleMute}
-        >
-          <Feather
-            name={isMuted ? 'mic-off' : 'mic'}
-            size={24}
-            color={isMuted ? '#ff4444' : '#fff'}
-          />
-        </TouchableOpacity>
-
-        <TouchableOpacity
-          style={[styles.controlButton, isVideoOff && styles.activeControl]}
-          onPress={toggleVideo}
-        >
-          <Feather
-            name={isVideoOff ? 'video-off' : 'video'}
-            size={24}
-            color={isVideoOff ? '#ff4444' : '#fff'}
-          />
-        </TouchableOpacity>
-
-        <TouchableOpacity style={styles.controlButton} onPress={switchCamera}>
-          <MaterialIcons name="flip-camera-android" size={24} color="#fff" />
-        </TouchableOpacity>
-
-        <TouchableOpacity
-          style={[styles.controlButton, styles.endCallButton]}
-          onPress={endCall}
-        >
-          <Feather name="phone-off" size={24} color="#fff" />
-        </TouchableOpacity>
-      </View>
-    </SafeAreaView>
+    </TouchableWithoutFeedback>
   );
 };
+
+// Small reusable button
+interface CBProps {
+  icon: string;
+  iconName?: string;
+  label: string;
+  onPress: () => void;
+  active?: boolean;
+  danger?: boolean;
+  iconComponent?: any;
+}
+const ControlBtn = ({
+  icon,
+  iconName,
+  label,
+  onPress,
+  active,
+  danger,
+  iconComponent: Icon,
+}: CBProps) => (
+  <TouchableOpacity
+    style={styles.controlBtnWrapper}
+    onPress={onPress}
+    activeOpacity={0.7}
+  >
+    <View
+      style={[
+        styles.controlBtnCircle,
+        active && styles.controlBtnActive,
+        danger && styles.controlBtnDanger,
+      ]}
+    >
+      {Icon ? (
+        <Icon name={iconName ?? icon} size={22} color="#fff" />
+      ) : (
+        <Feather name={icon} size={22} color="#fff" />
+      )}
+    </View>
+    <Text style={styles.controlBtnLabel}>{label}</Text>
+  </TouchableOpacity>
+);
 
 export default VideoCall;
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#000',
-  },
-  remoteVideo: {
-    flex: 1,
-    backgroundColor: '#000',
-  },
-  remoteVideoPlaceholder: {
-    flex: 1,
+  root: { flex: 1, backgroundColor: '#1a1a2e' },
+  remoteVideo: { ...StyleSheet.absoluteFillObject, backgroundColor: '#000' },
+  remotePlaceholder: {
+    ...StyleSheet.absoluteFillObject,
     justifyContent: 'center',
     alignItems: 'center',
+    backgroundColor: '#1a1a2e',
   },
-  avatarPlaceholder: {
+  avatarCircle: {
     width: 120,
     height: 120,
     borderRadius: 60,
-    backgroundColor: '#333',
+    backgroundColor: '#2d2d4e',
     justifyContent: 'center',
     alignItems: 'center',
-    marginBottom: 20,
+    borderWidth: 3,
+    borderColor: '#4a9fff',
+    marginBottom: 18,
   },
-  avatarText: {
-    fontSize: 48,
+  avatarLetter: { fontSize: 52, color: '#fff', fontWeight: '700' },
+  remoteNameText: {
     color: '#fff',
-    fontWeight: 'bold',
-  },
-  remoteUserName: {
-    fontSize: 24,
-    color: '#fff',
+    fontSize: 22,
     fontWeight: '600',
     marginBottom: 8,
   },
-  callStatusText: {
-    fontSize: 16,
-    color: '#aaa',
-    marginTop: 10,
-  },
-  connectionText: {
-    fontSize: 14,
-    color: '#888',
-    marginTop: 5,
-  },
-  localCameraContainer: {
+  statusLabel: { color: '#8899bb', fontSize: 15 },
+  topBar: {
     position: 'absolute',
-    top: 60,
-    right: 20,
-    width: 120,
-    height: 160,
-    borderRadius: 12,
+    top: 0,
+    left: 0,
+    right: 0,
+    paddingTop: 52,
+    paddingHorizontal: 20,
+    paddingBottom: 16,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    alignItems: 'center',
+  },
+  remoteName: {
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: '700',
+    letterSpacing: 0.3,
+  },
+  duration: {
+    color: '#ccd9ff',
+    fontSize: 13,
+    marginTop: 4,
+    letterSpacing: 0.5,
+  },
+  pipContainer: {
+    position: 'absolute',
+    width: PIP_W,
+    height: PIP_H,
+    borderRadius: 14,
     overflow: 'hidden',
     borderWidth: 2,
     borderColor: '#fff',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.5,
+    shadowRadius: 6,
+    elevation: 10,
   },
-  localCamera: {
-    flex: 1,
-  },
-  videoOffPlaceholder: {
-    backgroundColor: '#333',
+  pipVideo: { flex: 1 },
+  pipPlaceholder: {
+    backgroundColor: '#2a2a3e',
     justifyContent: 'center',
     alignItems: 'center',
   },
-  localAvatar: {
-    width: 80,
-    height: 80,
-    borderRadius: 40,
-    backgroundColor: '#555',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  localAvatarText: {
-    fontSize: 24,
-    color: '#fff',
-    fontWeight: 'bold',
-  },
-  callInfoOverlay: {
+  pipPlaceholderText: { fontSize: 28 },
+  controls: {
     position: 'absolute',
-    top: 20,
+    bottom: 0,
     left: 0,
     right: 0,
-    alignItems: 'center',
+    paddingBottom: 48,
+    paddingTop: 20,
+    paddingHorizontal: 24,
+    backgroundColor: 'rgba(0,0,0,0.55)',
+    gap: 16,
   },
-  callDuration: {
-    fontSize: 18,
-    color: '#fff',
-    fontWeight: '600',
-    marginBottom: 4,
-  },
-  callWithText: {
-    fontSize: 14,
-    color: '#aaa',
-  },
-  controlsContainer: {
-    position: 'absolute',
-    bottom: 50,
-    left: 0,
-    right: 0,
+  controlRow: {
     flexDirection: 'row',
     justifyContent: 'space-around',
     alignItems: 'center',
-    paddingHorizontal: 30,
   },
-  controlButton: {
-    width: 60,
-    height: 60,
-    borderRadius: 30,
-    backgroundColor: 'rgba(255,255,255,0.2)',
+  controlBtnWrapper: { alignItems: 'center', width: 72 },
+  controlBtnCircle: {
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    backgroundColor: 'rgba(255,255,255,0.18)',
     justifyContent: 'center',
     alignItems: 'center',
+    marginBottom: 6,
   },
-  activeControl: {
-    backgroundColor: 'rgba(255,68,68,0.3)',
+  controlBtnActive: {
+    backgroundColor: 'rgba(74,159,255,0.45)',
     borderWidth: 1,
-    borderColor: '#ff4444',
+    borderColor: '#4a9fff',
   },
-  endCallButton: {
-    backgroundColor: '#ff4444',
+  controlBtnDanger: {
+    backgroundColor: 'rgba(255,60,60,0.45)',
+    borderWidth: 1,
+    borderColor: '#ff3c3c',
+  },
+  controlBtnLabel: {
+    color: '#dde5ff',
+    fontSize: 11,
+    textAlign: 'center',
+    fontWeight: '500',
+  },
+  controlBtnPlaceholder: { width: 72 },
+  endCallBtn: {
+    width: 72,
+    height: 72,
+    borderRadius: 36,
+    backgroundColor: '#e53935',
+    justifyContent: 'center',
+    alignItems: 'center',
+    shadowColor: '#e53935',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.6,
+    shadowRadius: 8,
+    elevation: 8,
   },
 });

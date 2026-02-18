@@ -54,7 +54,7 @@ const StoryViewer = () => {
   const [progress, setProgress] = useState(0);
   const [localStoryUsers, setLocalStoryUsers] =
     useState<StoryUser[]>(storyUsers); // Add local state
-  const progressInterval = useRef<NodeJS.Timeout | null>(null);
+  const progressInterval = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Update local state when route params change
   useEffect(() => {
@@ -158,7 +158,7 @@ const StoryViewer = () => {
   }
 
   const handleDeleteStory = async () => {
-    if (!currentStory) return;
+    if (!currentStory || !storiesService) return;
 
     Alert.alert('Delete Story', 'Are you sure you want to delete this story?', [
       {
@@ -170,17 +170,13 @@ const StoryViewer = () => {
         style: 'destructive',
         onPress: async () => {
           try {
-            if (!storiesService) {
-              Alert.alert('Error', 'Stories service not available');
-              return;
-            }
-
             // Stop progress timer
             if (progressInterval.current) {
               clearInterval(progressInterval.current);
             }
 
-            await storiesService.deleteStory(currentStory.id);
+            // TypeScript needs explicit non-null assertion here
+            await storiesService!.deleteStory(currentStory.id);
 
             // Update local state immediately
             const updatedStoryUsers = [...localStoryUsers];
@@ -262,7 +258,7 @@ const StoryViewer = () => {
 
   // Start progress bar animation
   useEffect(() => {
-    if (currentStory) {
+    if (currentStory && storiesService) {
       startProgress();
 
       // Mark story as viewed
@@ -423,7 +419,7 @@ const StoryViewer = () => {
         onPressOut={startProgress}
       >
         {/* Debug logging */}
-        {console.log('Rendering image with mediaUrl:', currentStory.mediaUrl)}
+        {null /* console.log('Rendering image with mediaUrl:', currentStory.mediaUrl) */}
 
         {/* Handle image display - using Base64 from mediaData */}
         {currentStory.mediaData ? (

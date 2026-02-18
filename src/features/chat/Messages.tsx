@@ -22,9 +22,8 @@ import firestore, {
   startAfter,
   deleteDoc,
   doc,
-  FieldValue,
 } from '@react-native-firebase/firestore';
-import { navigationRef } from '../../core/navigation/AppNavigator';
+// import { navigationRef } from '../../core/navigation/AppNavigator';
 import { notificationService } from '../../core/services/notification.service';
 import Feather from 'react-native-vector-icons/Feather';
 import FontAwesome from 'react-native-vector-icons/FontAwesome';
@@ -127,8 +126,14 @@ const Messages = () => {
         // Check if this conversation is marked as deleted for current user
         const chatDocRef = doc(firestore(), 'chats', chatId);
         const chatDoc = await chatDocRef.get();
+        
+        // Check if chatDoc is null (Firebase error)
+        if (!chatDoc) {
+          console.log('❌ Firestore document query returned null');
+          return;
+        }
 
-        if (chatDoc.exists) {
+        if (chatDoc.exists()) {
           const chatData = chatDoc.data();
 
           // If chat is not marked as deleted for current user, include in conversation list
@@ -139,6 +144,12 @@ const Messages = () => {
               `chats/${chatId}/messages`,
             );
             const snapshot = await getDocs(messagesRef);
+            
+            // Check if snapshot is null (Firebase error)
+            if (!snapshot) {
+              console.log('❌ Firestore query returned null');
+              continue;
+            }
 
             if (!snapshot.empty) {
               usersWithConversations.push(targetUser);
@@ -182,6 +193,14 @@ const Messages = () => {
     const fetchUsers = async () => {
       try {
         const snapshot = await getDocs(q);
+        
+        // Check if snapshot is null (Firebase error)
+        if (!snapshot) {
+          console.log('❌ Firestore query returned null');
+          setUsers([]);
+          return;
+        }
+        
         const userList: User[] = [];
         snapshot.forEach((doc: any) => {
           userList.push(mapUser(doc.data()));
@@ -340,6 +359,12 @@ const Messages = () => {
                 `chats/${chatId}/messages`,
               );
               const messagesSnapshot = await getDocs(messagesRef);
+              
+              // Check if snapshot is null (Firebase error)
+              if (!messagesSnapshot) {
+                console.log('❌ Firestore query returned null for message deletion');
+                return;
+              }
 
               // Delete each message document in a batch operation
               const batch = firestore().batch();
@@ -351,7 +376,7 @@ const Messages = () => {
               // This allows for a fresh start when creating a new conversation
               const chatDocRef = doc(firestore(), 'chats', chatId);
               await chatDocRef.update({
-                deleted_for_users: FieldValue.arrayUnion(user.uid),
+                deleted_for_users: (firestore() as any).FieldValue.arrayUnion(user.uid),
               });
 
               await batch.commit();
@@ -506,8 +531,8 @@ const Messages = () => {
       // If user has existing stories, show them in story viewer
       const myStoryUser: StoryUser = {
         userId: user!.uid,
-        userName: user!.name || 'You',
-        userAvatar: user!.profile_image || '',
+        userName: userProfile?.name || 'You',
+        userAvatar: userProfile?.profile_image || '',
         stories: myStories,
         hasUnviewed: false, // For own stories, we don't track if they've been viewed
       };
@@ -564,6 +589,14 @@ const Messages = () => {
       const q = query(usersRef, where('uid', '!=', user?.uid));
 
       const snapshot = await getDocs(q);
+      
+      // Check if snapshot is null (Firebase error)
+      if (!snapshot) {
+        console.log('❌ Firestore query returned null during refresh');
+        setUsers([]);
+        return;
+      }
+      
       const userList: User[] = [];
       snapshot.forEach((doc: any) => {
         userList.push({
@@ -605,8 +638,8 @@ const Messages = () => {
     console.log('==========================');
 
     console.log('Setting up stories listener for user:', userProfile.uid); // Changed from user.uid
-    const unsubscribe = storiesService.listenToStories(
-      userProfile.uid, // Changed from user.uid
+    const unsubscribe = storiesService?.listenToStories(
+      userProfile.uid,
       (stories: StoryUser[]) => {
         console.log('=== STORIES CALLBACK DEBUG ===');
         console.log('Received stories array:', stories);
@@ -622,7 +655,7 @@ const Messages = () => {
         console.log('=============================');
         setStoryUsers(stories);
       },
-    );
+    ) || (() => {});
 
     return () => {
       if (typeof unsubscribe === 'function') {
@@ -642,7 +675,19 @@ const Messages = () => {
     if (!user) return;
 
     const loadMyStories = async () => {
-      const stories = await storiesService.getMyStories(user.uid);
+      const stories = await storiesService?.getMyStories(user.uid) || [];
+      setMyStories(stories);
+    };
+
+    loadMyStories();
+  }, [user]);
+
+  // Load your own stories
+  useEffect(() => {
+    if (!user) return;
+
+    const loadMyStories = async () => {
+      const stories = await storiesService?.getMyStories(user.uid) || [];
       setMyStories(stories);
     };
 
@@ -711,7 +756,7 @@ const Messages = () => {
             })),
           ]}
           horizontal
-          keyExtractor={(item, index) =>
+          keyExtractor={(item: any, index) =>
             item.id || item.userId || `index-${index}`
           }
           showsHorizontalScrollIndicator={false}
@@ -998,6 +1043,8 @@ const styles = StyleSheet.create({
   listContent: {
     backgroundColor: '#FFF',
     flex: 1,
+   
+
   },
   messageItem: {
     flexDirection: 'row',
@@ -1033,6 +1080,7 @@ const styles = StyleSheet.create({
   },
   messageContent: {
     flex: 1,
+   
   },
   contactName: {
     fontSize: 16,

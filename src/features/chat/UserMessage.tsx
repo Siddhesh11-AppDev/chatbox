@@ -23,6 +23,7 @@ import { AppStackParamList } from '../../core/navigation/AppNavigator';
 import AppTextInput from '../../shared/components/AppTextInput';
 import { useAuth } from '../../core/context/AuthContext';
 import { chatService } from '../../core/services/chat.service';
+import { notificationService } from '../../core/services/notification.service';
 import firestore, {
   getDocs,
   query,
@@ -50,9 +51,9 @@ interface Message {
 }
 
 const UserMessage = ({ route }: Props) => {
-  const navigation = useNavigation();
+  const navigation = useNavigation<NativeStackScreenProps<AppStackParamList>['navigation']>();
   const { userData } = route.params;
-  const { user } = useAuth();
+  const { user, userProfile } = useAuth();
 
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputText, setInputText] = useState('');
@@ -67,7 +68,7 @@ const UserMessage = ({ route }: Props) => {
     requestCameraPermission();
   }, []);
 
-  const requestCameraPermission = async () => {
+  const requestCameraPermission = async (): Promise<boolean> => {
     if (Platform.OS === 'android') {
       try {
         const granted = await PermissionsAndroid.request(
@@ -83,19 +84,23 @@ const UserMessage = ({ route }: Props) => {
         if (granted === PermissionsAndroid.RESULTS.GRANTED) {
           console.log('Camera permission granted');
           setHasCameraPermission(true);
+          return true;
         } else {
           console.log('Camera permission denied');
           Alert.alert(
             'Permission Denied',
             'Camera permission is required to take photos',
           );
+          return false;
         }
       } catch (err) {
         console.warn(err);
+        return false;
       }
     } else {
       // iOS handles permissions differently, usually granted during app installation
       setHasCameraPermission(true);
+      return true;
     }
   };
 
@@ -114,6 +119,100 @@ const UserMessage = ({ route }: Props) => {
     return () => unsubscribe();
   }, [user, userData]);
 
+  const handleVideoCall = async () => {
+    console.log('=== INITIATING VIDEO CALL ===');
+    console.log('Caller:', user?.uid);
+    console.log('Receiver:', userData.uid);
+    
+    try {
+      // Generate call ID
+      const callId = `call_${[user!.uid, userData.uid].sort().join('_')}_${Date.now()}`;
+      
+      // Send notification to receiver
+      await notificationService.sendCallNotification({
+        receiverId: userData.uid,
+        callerId: user!.uid,
+        callerName: user?.displayName || user?.email || 'User',
+        callerAvatar: userProfile?.profile_image,
+        callId: callId,
+        callType: 'video',
+      });
+      
+      console.log('✅ Call notification sent successfully');
+      Alert.alert(
+        'Calling...', 
+        `Calling ${userData.name}. Please wait for them to answer.`,
+        [
+          {
+            text: 'Cancel',
+            style: 'cancel',
+            onPress: async () => {
+              console.log('User cancelled the call');
+              try {
+                // Cancel the call notification
+                await notificationService.cancelCallNotification(callId, userData.uid);
+                console.log('✅ Call cancelled successfully');
+              } catch (error) {
+                console.error('❌ Error cancelling call:', error);
+              }
+            }
+          }
+        ]
+      );
+      
+    } catch (error) {
+      console.error('❌ Error initiating call:', error);
+      Alert.alert('Error', 'Failed to initiate call. Please try again.');
+    }
+  };
+
+  const handleVoiceCall = async () => {
+    console.log('=== INITIATING VOICE CALL ===');
+    console.log('Caller:', user?.uid);
+    console.log('Receiver:', userData.uid);
+    
+    try {
+      // Generate call ID
+      const callId = `call_${[user!.uid, userData.uid].sort().join('_')}_${Date.now()}`;
+      
+      // Send notification to receiver
+      await notificationService.sendCallNotification({
+        receiverId: userData.uid,
+        callerId: user!.uid,
+        callerName: user?.displayName || user?.email || 'User',
+        callerAvatar: userProfile?.profile_image,
+        callId: callId,
+        callType: 'audio',
+      });
+      
+      console.log('✅ Voice call notification sent successfully');
+      Alert.alert(
+        'Calling...', 
+        `Calling ${userData.name}. Please wait for them to answer.`,
+        [
+          {
+            text: 'Cancel',
+            style: 'cancel',
+            onPress: async () => {
+              console.log('User cancelled the voice call');
+              try {
+                // Cancel the call notification
+                await notificationService.cancelCallNotification(callId, userData.uid);
+                console.log('✅ Voice call cancelled successfully');
+              } catch (error) {
+                console.error('❌ Error cancelling voice call:', error);
+              }
+            }
+          }
+        ]
+      );
+      
+    } catch (error) {
+      console.error('❌ Error initiating voice call:', error);
+      Alert.alert('Error', 'Failed to initiate voice call. Please try again.');
+    }
+  };
+
   const handleSendMessage = async () => {
     if (!inputText.trim() || !user) return;
 
@@ -128,8 +227,14 @@ const UserMessage = ({ route }: Props) => {
       // Remove current user from deleted_for_users array to "undelete" the conversation
       const chatDocRef = firestore().doc(`chats/${chatId}`);
       const chatDoc = await chatDocRef.get();
+      
+      // Check if chatDoc is null (Firebase error)
+      if (!chatDoc) {
+        console.log('❌ Firestore document query returned null');
+        return;
+      }
 
-      if (chatDoc.exists) {
+      if (chatDoc.exists()) {
         const chatData = chatDoc.data();
         if (chatData?.deleted_for_users?.includes(user.uid)) {
           // Remove current user from the deleted array
@@ -161,8 +266,14 @@ const UserMessage = ({ route }: Props) => {
       // Remove current user from deleted_for_users array to "undelete" the conversation
       const chatDocRef = firestore().doc(`chats/${chatId}`);
       const chatDoc = await chatDocRef.get();
+      
+      // Check if chatDoc is null (Firebase error)
+      if (!chatDoc) {
+        console.log('❌ Firestore document query returned null');
+        return;
+      }
 
-      if (chatDoc.exists) {
+      if (chatDoc.exists()) {
         const chatData = chatDoc.data();
         if (chatData?.deleted_for_users?.includes(user.uid)) {
           // Remove current user from the deleted array
@@ -350,6 +461,13 @@ const UserMessage = ({ route }: Props) => {
         );
 
         const snapshot = await getDocs(q);
+        
+        // Check if snapshot is null (Firebase error)
+        if (!snapshot) {
+          console.log('❌ Firestore query returned null');
+          return;
+        }
+        
         console.log(`Found ${snapshot.size} unread messages to mark as read`);
 
         if (snapshot.empty) {
@@ -436,9 +554,7 @@ const UserMessage = ({ route }: Props) => {
             <Text
               style={[
                 styles.timestamp,
-                !isCurrentUser && isCurrentUser
-                  ? styles.rightTimestamp
-                  : styles.leftTimestamp,
+                isCurrentUser ? styles.rightTimestamp : styles.leftTimestamp,
               ]}
             >
               {formatTime(item.timestamp)}
@@ -479,10 +595,7 @@ const UserMessage = ({ route }: Props) => {
             <TouchableOpacity
               style={{ width: '60%' }}
               onPress={() =>
-                navigation.navigate(
-                  'userProfile' as never,
-                  { userData } as never,
-                )
+                navigation.navigate('userProfile', { userData })
               }
             >
               <View>
@@ -501,16 +614,11 @@ const UserMessage = ({ route }: Props) => {
                 gap: 30,
               }}
             >
-              <TouchableOpacity>
+              <TouchableOpacity onPress={handleVoiceCall}>
                 <Feather name="phone" size={24} color="#000" />
               </TouchableOpacity>
               <TouchableOpacity
-                onPress={() =>
-                  navigation.navigate(
-                    'videoCall' as never,
-                    { userData } as never,
-                  )
-                }
+                onPress={handleVideoCall}
               >
                 <Feather name="video" size={24} color="#000" />
               </TouchableOpacity>
@@ -822,5 +930,5 @@ const styles = StyleSheet.create({
     width: 200,
     height: 200,
     borderRadius: 8,
-  },
+  }, 
 });

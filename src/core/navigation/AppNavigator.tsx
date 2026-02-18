@@ -1,4 +1,4 @@
-import { StyleSheet } from 'react-native';
+
 import React from 'react';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import SplashScreen from '../SplashScreen';
@@ -9,6 +9,7 @@ import { useAuth } from '../context/AuthContext';
 import UserMessage from '../../features/chat/UserMessage';
 import UserProfile from '../../features/user/UserProfile';
 import VideoCall from '../../features/chat/VideoCall';
+import VoiceCall from '../../features/chat/VoiceCall';
 import StoryViewer from '../../features/stories/StoryViewer';
 import StoryCreator from '../../features/stories/StoryCreator';
 import IncomingCallScreen from '../../features/chat/IncomingCallScreen';
@@ -20,13 +21,30 @@ export type AppStackParamList = {
   Tab: undefined;
   userMsg: { userData: any };
   userProfile: { userData: any };
-  videoCall: { userData: any };
+  // ↓ lowercase — must match navigation.navigate('videoCall', ...) calls
+  videoCall: {
+    userData: { uid: string; name: string; profile_image?: string };
+    isIncomingCall?: boolean;
+    callId?: string;
+  };
+  voiceCall: {
+    userData: { uid: string; name: string; profile_image?: string };
+    isIncomingCall?: boolean;
+    callId?: string;
+  };
+  // IncomingCall at top level so it can be reached from anywhere
+  IncomingCall: {
+    callId: string;
+    callerId: string;
+    callerName: string;
+    callerAvatar?: string;
+    type?: 'video' | 'audio';
+  };
   StoryViewer: {
     storyUsers: import('../services/stories.service').StoryUser[];
     initialIndex: number;
   };
   StoryCreator: undefined;
-  IncomingCall: undefined;
   Settings: undefined;
 };
 
@@ -47,24 +65,24 @@ const AppNavigator = () => {
     <Stack.Navigator screenOptions={{ headerShown: false }}>
       {user ? (
         <>
-          <Stack.Screen name="Tab" component={TabNavigator} />
-          <Stack.Screen name="userMsg" component={UserMessage} />
+          <Stack.Screen name="Tab"         component={TabNavigator} />
+          <Stack.Screen name="userMsg"     component={UserMessage} />
           <Stack.Screen name="userProfile" component={UserProfile} />
+
           <Stack.Screen
             name="videoCall"
             component={VideoCall}
-            options={{
-              presentation: 'fullScreenModal',
-              gestureEnabled: false,
-            }}
+            options={{ presentation: 'fullScreenModal', gestureEnabled: false }}
+          />
+          <Stack.Screen
+            name="voiceCall"
+            component={VoiceCall}
+            options={{ presentation: 'fullScreenModal', gestureEnabled: false }}
           />
           <Stack.Screen
             name="IncomingCall"
             component={IncomingCallScreen}
-            options={{
-              presentation: 'fullScreenModal',
-              gestureEnabled: false,
-            }}
+            options={{ presentation: 'fullScreenModal', gestureEnabled: false }}
           />
           <Stack.Screen
             name="StoryViewer"
@@ -79,9 +97,9 @@ const AppNavigator = () => {
         </>
       ) : (
         <>
-          <Stack.Screen name="Splash" component={SplashScreen} />
+          <Stack.Screen name="Splash"  component={SplashScreen} />
           <Stack.Screen name="OnBoard" component={OnBoarding} />
-          <Stack.Screen name="Auth" component={AuthNavigator} />
+          <Stack.Screen name="Auth"    component={AuthNavigator} />
         </>
       )}
     </Stack.Navigator>
@@ -89,5 +107,3 @@ const AppNavigator = () => {
 };
 
 export default AppNavigator;
-
-const styles = StyleSheet.create({});

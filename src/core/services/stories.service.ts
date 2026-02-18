@@ -1,4 +1,4 @@
-import firestore, { serverTimestamp, FieldValue } from '@react-native-firebase/firestore';
+import firestore, { serverTimestamp, Timestamp } from '@react-native-firebase/firestore';
 import RNFS from 'react-native-fs';
 import { Buffer } from 'buffer';
 
@@ -11,9 +11,9 @@ export interface Story {
   mediaData?: string;
   mediaType: 'image' | 'video';
   caption?: string;
-  timestamp: FirebaseFirestoreTypes.Timestamp;
+  timestamp: Timestamp;
   viewers: string[];
-  expiresAt: FirebaseFirestoreTypes.Timestamp;
+  expiresAt?: Timestamp;
 }
 
 export interface StoryUser {
@@ -49,7 +49,7 @@ class StoriesService {
       return base64Data;
     } catch (error) {
       console.error('Error converting media to base64:', error);
-      throw error;
+      throw error instanceof Error ? error : new Error(String(error));
     }
   }
 
@@ -68,7 +68,7 @@ class StoriesService {
       return base64Data;
     } catch (error) {
       console.error('Error processing story media:', error);
-      throw error;
+      throw error instanceof Error ? error : new Error(String(error));
     }
   }
 
@@ -102,7 +102,7 @@ class StoriesService {
       return storyRef.id;
     } catch (error) {
       console.error('Error creating story:', error);
-      throw error;
+      throw error instanceof Error ? error : new Error(String(error));
     }
   }
 
@@ -116,6 +116,12 @@ class StoriesService {
         .collection('stories')
         .where('timestamp', '<=', new Date(now - twentyFourHours))
         .get();
+      
+      // Check if snapshot is null (Firebase error)
+      if (!snapshot) {
+        console.log('❌ Firestore query returned null');
+        return;
+      }
 
       if (!snapshot.empty) {
         const batch = this.firestore.batch();
@@ -127,40 +133,36 @@ class StoriesService {
         console.log(`Cleaned up ${snapshot.size} expired stories`);
       }
     } catch (error) {
-      console.error('Error cleaning up expired stories:', error);
+      console.error('Error cleaning up expired stories:', error instanceof Error ? error : new Error(String(error)));
     }
   }
 
-
-private async getChatPartners(userId: string): Promise<string[]> {
-  try {
-    // Get all chats and filter client-side (avoids index requirement)
-    const chatsSnapshot = await this.firestore
-      .collection('chats')
-      .get();
-    
-    const partners = new Set<string>();
-    chatsSnapshot.docs.forEach(doc => {
-      const chat = doc.data();
-      if (chat.participants && Array.isArray(chat.participants)) {
-        chat.participants.forEach((participantId: string) => {
-          if (participantId !== userId) {
-            partners.add(participantId);
-          }
-        });
-      }
-    });
-    
-    console.log('Chat partners found:', Array.from(partners));
-    return Array.from(partners);
-  } catch (error) {
-    console.error('Error getting chat partners:', error);
-    return [];
+  private async getChatPartners(userId: string): Promise<string[]> {
+    try {
+      // Get all chats and filter client-side (avoids index requirement)
+      const chatsSnapshot = await this.firestore
+        .collection('chats')
+        .get();
+      
+      const partners = new Set<string>();
+      chatsSnapshot.docs.forEach(doc => {
+        const chat = doc.data();
+        if (chat.participants && Array.isArray(chat.participants)) {
+          chat.participants.forEach((participantId: string) => {
+            if (participantId !== userId) {
+              partners.add(participantId);
+            }
+          });
+        }
+      });
+      
+      console.log('Chat partners found:', Array.from(partners));
+      return Array.from(partners);
+    } catch (error) {
+      console.error('Error getting chat partners:', error instanceof Error ? error : new Error(String(error)));
+      return [];
+    }
   }
-}
-
-
-
 
   async listenToStories(currentUserId: string, callback: (storyUsers: StoryUser[]) => void) {
     console.log('Listening to stories for user:', currentUserId);
@@ -214,7 +216,7 @@ private async getChatPartners(userId: string): Promise<string[]> {
                   }
                 }
               } catch (error) {
-                console.error('Error processing story:', error);
+                console.error('Error processing story:', error instanceof Error ? error : new Error(String(error)));
               }
             });
 
@@ -226,7 +228,7 @@ private async getChatPartners(userId: string): Promise<string[]> {
                 
                 try {
                   const userDoc = await this.firestore.collection('users').doc(userId).get();
-                  if (userDoc.exists) {
+                  if (userDoc.exists()) {
                     const userData = userDoc.data();
                     const hasUnviewed = stories.some(story => !story.viewers.includes(currentUserId));
 
@@ -239,7 +241,7 @@ private async getChatPartners(userId: string): Promise<string[]> {
                     });
                   }
                 } catch (error) {
-                  console.error(`Error fetching user data for ${userId}:`, error);
+                  console.error(`Error fetching user data for ${userId}:`, error instanceof Error ? error : new Error(String(error)));
                 }
               }
             };
@@ -247,7 +249,7 @@ private async getChatPartners(userId: string): Promise<string[]> {
             processUsers().then(() => {
               callback(storyUsers);
             }).catch((error) => {
-              console.error('Error processing stories:', error);
+              console.error('Error processing stories:', error instanceof Error ? error : new Error(String(error)));
               callback(storyUsers);
             });
           },
@@ -257,12 +259,12 @@ private async getChatPartners(userId: string): Promise<string[]> {
           }
         );
 
-    return unsubscribe;
-  } catch (error) {
-    console.error('Error setting up stories listener:', error);
-    return () => {};
+      return unsubscribe;
+    } catch (error) {
+      console.error('Error setting up stories listener:', error instanceof Error ? error : new Error(String(error)));
+      return () => {};
+    }
   }
-}
 
   async getMyStories(userId: string): Promise<Story[]> {
     try {
@@ -305,8 +307,8 @@ private async getChatPartners(userId: string): Promise<string[]> {
       console.log('===========================');
       return stories;
     } catch (error) {
-      console.error('Error getting my stories:', error);
-      if (error.code === 'failed-precondition') {
+      console.error('Error getting my stories:', error instanceof Error ? error : new Error(String(error)));
+      if (error && typeof error === 'object' && 'code' in error && error.code === 'failed-precondition') {
         console.error('Firestore index error - this is expected and handled');
       }
       return [];
@@ -319,8 +321,8 @@ private async getChatPartners(userId: string): Promise<string[]> {
       await this.firestore.collection('stories').doc(storyId).delete();
       console.log('Story deleted successfully');
     } catch (error) {
-      console.error('Error deleting story:', error);
-      throw error;
+      console.error('Error deleting story:', error instanceof Error ? error : new Error(String(error)));
+      throw error instanceof Error ? error : new Error(String(error));
     }
   }
 
@@ -330,11 +332,11 @@ private async getChatPartners(userId: string): Promise<string[]> {
         .collection('stories')
         .doc(storyId)
         .update({
-          viewers: FieldValue.arrayUnion(userId),
+          viewers: firestore.FieldValue.arrayUnion(userId),
         });
     } catch (error) {
-      console.error('Error marking story as viewed:', error);
-      throw error;
+      console.error('Error marking story as viewed:', error instanceof Error ? error : new Error(String(error)));
+      throw error instanceof Error ? error : new Error(String(error));
     }
   }
 }
@@ -344,7 +346,7 @@ let storiesServiceInstance: StoriesService | null = null;
 try {
   storiesServiceInstance = new StoriesService();
 } catch (error) {
-  console.error('Failed to initialize stories service:', error);
+  console.error('Failed to initialize stories service:', error instanceof Error ? error : new Error(String(error)));
   storiesServiceInstance = null;
 }
 

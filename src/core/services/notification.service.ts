@@ -2,16 +2,17 @@ import messaging, { FirebaseMessagingTypes } from '@react-native-firebase/messag
 import { Platform, Alert, Vibration } from 'react-native';
 import { NavigationContainerRef } from '@react-navigation/native';
 import firestore, { serverTimestamp } from '@react-native-firebase/firestore';
+import { RootStackParamList } from '../../../App';
 
 class NotificationService {
-  private navigationRef: NavigationContainerRef | null = null;
+  private navigationRef: NavigationContainerRef<RootStackParamList> | null = null;
   private foregroundMessageListener: (() => void) | null = null;
 
   constructor() {
     // Don't call async methods in constructor
   }
 
-  setNavigationRef(ref: NavigationContainerRef) {
+  setNavigationRef(ref: NavigationContainerRef<RootStackParamList>) {
     this.navigationRef = ref;
   }
 
@@ -81,18 +82,20 @@ class NotificationService {
     Vibration.vibrate([0, 500, 500, 500], true);
 
     if (this.navigationRef) {
-      this.navigationRef.navigate('IncomingCall' as never, {
-        screen: 'IncomingCall',
+      // Navigate through the correct navigation structure: AppNav -> Tab -> IncomingCall
+      this.navigationRef.navigate('AppNav' as any, {
+        screen: 'Tab',
         params: {
-          callData: {
+          screen: 'IncomingCall',
+          params: {
+            callId: callData.callId,
             callerId: callData.callerId,
             callerName: callData.callerName,
             callerAvatar: callData.callerAvatar,
-            callId: callData.callId,
-            type: callData.callType || 'video',
-          },
-        },
-      } as never);
+            type: callData.type || 'video',
+          }
+        }
+      } as any);
     }
   }
 
@@ -113,6 +116,14 @@ class NotificationService {
     callType?: 'video' | 'audio';
   }) {
     try {
+      console.log('=== SENDING CALL NOTIFICATION ===');
+      console.log('Receiver ID:', receiverId);
+      console.log('Caller ID:', callerId);
+      console.log('Caller Name:', callerName);
+      console.log('Call ID:', callId);
+      console.log('Call Type:', callType);
+
+      // First, update the calls collection
       await firestore()
         .collection('calls')
         .doc(callId)
@@ -127,30 +138,67 @@ class NotificationService {
           createdAt: serverTimestamp(),
         }, { merge: true });
 
+      console.log('✅ Call document created in calls collection');
+
       // Update receiver's user document with incoming call
+      const incomingCallData = {
+        callId,
+        callerId,
+        callerName,
+        callerAvatar,
+        callType,
+        timestamp: serverTimestamp(),
+      };
+
+      console.log('Updating user document with incoming call data:', incomingCallData);
+
       await firestore()
         .collection('users')
         .doc(receiverId)
         .set({
-          incomingCall: {
-            callId,
-            callerId,
-            callerName,
-            callerAvatar,
-            callType,
-            timestamp: serverTimestamp(),
-          }
+          incomingCall: incomingCallData
         }, { merge: true });
 
-      console.log('Call notification sent via Firestore');
+      console.log('✅ User document updated with incoming call');
+      console.log('Call notification sent via Firestore successfully');
+
+      // Verify the data was written
+      const userDoc = await firestore().collection('users').doc(receiverId).get();
+      console.log('Verification - User document after update:', userDoc.data());
+
     } catch (error) {
-      console.error('Error sending call notification:', error);
+      console.error('❌ Error sending call notification:', error);
+      throw error;
+    }
+  }
+
+  // Clear incoming call from user document
+  async clearIncomingCall(userId: string) {
+    try {
+      console.log('=== CLEARING INCOMING CALL ===');
+      console.log('User ID:', userId);
+      
+      await firestore()
+        .collection('users')
+        .doc(userId)
+        .update({
+          incomingCall: null,
+        });
+      
+      Vibration.cancel();
+      console.log('✅ Incoming call cleared successfully');
+    } catch (error) {
+      console.error('❌ Error clearing incoming call:', error);
     }
   }
 
   // Cancel/End call notification
   async cancelCallNotification(callId: string, receiverId?: string) {
     try {
+      console.log('=== CANCELING CALL NOTIFICATION ===');
+      console.log('Call ID:', callId);
+      console.log('Receiver ID:', receiverId);
+      
       Vibration.cancel();
       
       await firestore()
@@ -163,17 +211,101 @@ class NotificationService {
 
       // Clear receiver's incoming call if provided
       if (receiverId) {
-        await firestore()
-          .collection('users')
-          .doc(receiverId)
-          .update({
-            incomingCall: null,
-          });
+        await this.clearIncomingCall(receiverId);
       }
 
-      console.log('Call notification cancelled');
+      console.log('✅ Call notification cancelled');
     } catch (error) {
-      console.error('Error cancelling call notification:', error);
+      console.error('❌ Error cancelling call notification:', error);
+    }
+  }
+
+  // NEW METHOD: Send missed call notification
+  async sendMissedCallNotification({
+    receiverId,
+    callerName,
+    callId,
+  }: {
+    receiverId: string;
+    callerName: string;
+    callId: string;
+  }) {
+    try {
+      console.log('=== SENDING MISSED CALL NOTIFICATION ===');
+      console.log('Receiver ID:', receiverId);
+      console.log('Caller Name:', callerName);
+      console.log('Call ID:', callId);
+
+      // Update receiver's user document with missed call
+      const missedCallData = {
+        type: 'missed_call',
+        callerName,
+        callId,
+        timestamp: serverTimestamp(),
+      };
+
+      console.log('Updating user document with missed call data:', missedCallData);
+
+      await firestore()
+        .collection('users')
+        .doc(receiverId)
+        .set({
+          missedCall: missedCallData
+        }, { merge: true });
+
+      console.log('✅ Missed call notification sent successfully');
+
+      // Verify the data was written
+      const userDoc = await firestore().collection('users').doc(receiverId).get();
+      console.log('Verification - User document after update:', userDoc.data());
+
+    } catch (error) {
+      console.error('❌ Error sending missed call notification:', error);
+      throw error;
+    }
+  }
+
+  // NEW METHOD: Send call status notification
+  async sendCallStatusNotification({
+    receiverId,
+    status,
+    callId,
+  }: {
+    receiverId: string;
+    status: string;
+    callId: string;
+  }) {
+    try {
+      console.log('=== SENDING CALL STATUS NOTIFICATION ===');
+      console.log('Receiver ID:', receiverId);
+      console.log('Status:', status);
+      console.log('Call ID:', callId);
+
+      // Update receiver's user document with call status
+      const callStatusData = {
+        status,
+        callId,
+        timestamp: serverTimestamp(),
+      };
+
+      console.log('Updating user document with call status data:', callStatusData);
+
+      await firestore()
+        .collection('users')
+        .doc(receiverId)
+        .set({
+          callStatus: callStatusData
+        }, { merge: true });
+
+      console.log('✅ Call status notification sent successfully');
+
+      // Verify the data was written
+      const userDoc = await firestore().collection('users').doc(receiverId).get();
+      console.log('Verification - User document after update:', userDoc.data());
+
+    } catch (error) {
+      console.error('❌ Error sending call status notification:', error);
+      throw error;
     }
   }
 
@@ -206,15 +338,43 @@ class NotificationService {
 
   // Listen for incoming calls
   listenForIncomingCalls(userId: string, onIncomingCall: (callData: any) => void): () => void {
+    console.log('=== LISTENING FOR INCOMING CALLS ===');
+    console.log('User ID:', userId);
+    console.log('Setting up Firestore listener for user:', userId);
+    console.log('Current timestamp:', new Date().toISOString());
+    
     const unsubscribe = firestore()
       .collection('users')
       .doc(userId)
-      .onSnapshot((doc) => {
+      .onSnapshot({ includeMetadataChanges: true }, (doc) => {
+        console.log('=== USER DOCUMENT SNAPSHOT ===');
+        console.log('Document exists:', doc.exists);
+        console.log('Document data:', doc.data());
+        console.log('Metadata hasPendingWrites:', doc.metadata.hasPendingWrites);
+        console.log('Metadata fromCache:', doc.metadata.fromCache);
+        console.log('Snapshot received at:', new Date().toISOString());
+        
+        // Skip local changes that haven't been committed
+        if (doc.metadata.hasPendingWrites) {
+          console.log('Skipping local pending write');
+          return;
+        }
+        
         const data = doc.data();
+        console.log('Checking for incomingCall field:', data?.incomingCall);
+        
         if (data?.incomingCall) {
           const callData = data.incomingCall;
+          console.log('=== INCOMING CALL DATA DETECTED ===');
+          console.log('Full call data:', callData);
+          console.log('Call ID:', callData.callId);
+          console.log('Caller ID:', callData.callerId);
+          console.log('Caller Name:', callData.callerName);
+          console.log('Timestamp:', callData.timestamp?.toDate?.() || callData.timestamp);
           
-          if (callData.callId) {
+          // Validate required fields
+          if (callData.callId && callData.callerId && callData.callerName) {
+            console.log('=== VALID CALL DATA - TRIGGERING CALLBACK ===');
             Vibration.vibrate([0, 500, 500, 500], true);
             
             onIncomingCall({
@@ -224,8 +384,23 @@ class NotificationService {
               callerAvatar: callData.callerAvatar,
               type: callData.callType || 'video',
             });
+          } else {
+            console.log('=== INVALID CALL DATA - MISSING REQUIRED FIELDS ===');
+            console.log('Missing fields:', {
+              callId: !callData.callId,
+              callerId: !callData.callerId,
+              callerName: !callData.callerName
+            });
+          }
+        } else {
+          console.log('No incoming call data found in document');
+          if (data) {
+            console.log('Available fields in user document:', Object.keys(data));
           }
         }
+      }, (error) => {
+        console.error('=== FIRESTORE LISTENER ERROR ===');
+        console.error('Error listening for incoming calls:', error);
       });
 
     return unsubscribe;
@@ -257,21 +432,6 @@ class NotificationService {
         });
     } catch (error) {
       console.error('Error marking notification as read:', error);
-    }
-  }
-
-  // Clear incoming call from user document
-  async clearIncomingCall(userId: string) {
-    try {
-      await firestore()
-        .collection('users')
-        .doc(userId)
-        .update({
-          incomingCall: null,
-        });
-      Vibration.cancel();
-    } catch (error) {
-      console.error('Error clearing incoming call:', error);
     }
   }
 

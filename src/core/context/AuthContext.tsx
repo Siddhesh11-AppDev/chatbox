@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useEffect, useState, ReactNode } from 'react';
-import { getAuth, onAuthStateChanged } from '@react-native-firebase/auth';
+import { getAuth, onAuthStateChanged, FirebaseAuthTypes } from '@react-native-firebase/auth';
 import firestore from '@react-native-firebase/firestore';
 import messaging from '@react-native-firebase/messaging';
 
@@ -14,7 +14,7 @@ interface UserProfile {
 }
 
 interface AuthContextType {
-  user: import('firebase/auth').User | null;
+  user: FirebaseAuthTypes.User | null;
   userProfile: UserProfile | null;
   loading: boolean;
 }
@@ -22,7 +22,7 @@ interface AuthContextType {
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export const AuthProvider = ({ children }: { children: ReactNode }) => {
-  const [user, setUser] = useState<import('firebase/auth').User | null>(null);
+  const [user, setUser] = useState<FirebaseAuthTypes.User | null>(null);
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
   const [loading, setLoading] = useState(true);
   const auth = getAuth();
@@ -80,7 +80,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
           
           if (!isMounted) return;
           
-          if (userDoc.exists) {
+          if (userDoc.exists()) {
             const userData = userDoc.data();
             setUserProfile({
               uid: firebaseUser.uid,
