@@ -26,11 +26,13 @@ export type AppStackParamList = {
     userData: { uid: string; name: string; profile_image?: string };
     isIncomingCall?: boolean;
     callId?: string;
+    callType?: 'video' | 'audio';
   };
   voiceCall: {
     userData: { uid: string; name: string; profile_image?: string };
     isIncomingCall?: boolean;
     callId?: string;
+    callType?: 'video' | 'audio';
   };
   // IncomingCall at top level so it can be reached from anywhere
   IncomingCall: {

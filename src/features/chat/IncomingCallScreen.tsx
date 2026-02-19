@@ -1,5 +1,3 @@
-
-
 import React, { useEffect, useRef, useState } from 'react';
 import {
   View,
@@ -10,6 +8,7 @@ import {
   Animated,
   Dimensions,
   StatusBar,
+  ActivityIndicator,
 } from 'react-native';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { useAuth } from '../../core/context/AuthContext';
@@ -18,15 +17,17 @@ import { notificationService } from '../../core/services/notification.service';
 import Feather from 'react-native-vector-icons/Feather';
 
 let InCallManager: any = null;
-try { InCallManager = require('react-native-incall-manager').default; } catch (_) {}
+try {
+  InCallManager = require('react-native-incall-manager').default;
+} catch (_) {}
 
 const { width } = Dimensions.get('window');
 const AUTO_DECLINE_SEC = 60;
 
 const IncomingCallScreen = () => {
   const navigation = useNavigation<any>();
-  const route      = useRoute();
-  const { user }   = useAuth();
+  const route = useRoute();
+  const { user } = useAuth();
 
   const {
     callId,
@@ -42,10 +43,12 @@ const IncomingCallScreen = () => {
     type?: 'video' | 'audio';
   };
 
-  const [avatar, setAvatar]     = useState<string | undefined>(callerAvatar);
+  const [avatar, setAvatar] = useState<string | undefined>(callerAvatar);
   const [timeLeft, setTimeLeft] = useState(AUTO_DECLINE_SEC);
-  const pulseAnim  = useRef(new Animated.Value(1)).current;
-  const timerRef   = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [accepting, setAccepting] = useState(false);
+
+  const pulseAnim = useRef(new Animated.Value(1)).current;
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const handledRef = useRef(false);
 
   useEffect(() => {
@@ -53,17 +56,27 @@ const IncomingCallScreen = () => {
 
     const pulse = Animated.loop(
       Animated.sequence([
-        Animated.timing(pulseAnim, { toValue: 1.14, duration: 650, useNativeDriver: true }),
-        Animated.timing(pulseAnim, { toValue: 1,    duration: 650, useNativeDriver: true }),
-      ])
+        Animated.timing(pulseAnim, {
+          toValue: 1.14,
+          duration: 650,
+          useNativeDriver: true,
+        }),
+        Animated.timing(pulseAnim, {
+          toValue: 1,
+          duration: 650,
+          useNativeDriver: true,
+        }),
+      ]),
     );
     pulse.start();
-
     loadAvatar();
 
     timerRef.current = setInterval(() => {
       setTimeLeft(t => {
-        if (t <= 1) { rejectCall(); return 0; }
+        if (t <= 1) {
+          rejectCall();
+          return 0;
+        }
         return t - 1;
       });
     }, 1000);
@@ -81,26 +94,55 @@ const IncomingCallScreen = () => {
       const doc = await firestore().collection('users').doc(callerId).get();
       if (doc.exists()) {
         const data = doc.data();
-        if (data && data.profile_image) {
-          setAvatar(data.profile_image);
-        }
+        if (data?.profile_image) setAvatar(data.profile_image);
       }
     } catch (_) {}
   };
 
-  // ─────────────────────────────────────────────────────────────────────
-  //  ACCEPT
-  //  KEY FIX: navigate() is called SYNCHRONOUSLY (no await before it).
-  //  clearIncomingCall runs in the background after navigation.
-  // ─────────────────────────────────────────────────────────────────────
-  const acceptCall = () => {
+  // ─────────────────────────────────────────────────────────────────────────
+  //  ACCEPT  —  order is critical
+  //
+  //  1. await write status='answered'
+  //     The caller's VideoCall is stuck in a Firestore snapshot waiting for
+  //     this exact value. Nothing happens until this resolves.
+  //
+  //  2. navigate immediately (synchronous after the await)
+  //     VideoCall.initialize(false) will now only write participant metadata
+  //     (not status), so 'answered' remains in Firestore and the caller's
+  //     acceptListenerRef fires exactly once.
+  //
+  //  3. clearIncomingCall AFTER navigation (fire-and-forget)
+  //     If cleared before navigation, NotificationHandler resets its guard
+  //     (lastShownCallId = null) while VideoCall is still booting — a stale
+  //     Firestore cache snapshot can then re-open IncomingCallScreen on top
+  //     of the live call.
+  // ─────────────────────────────────────────────────────────────────────────
+  const acceptCall = async () => {
     if (handledRef.current) return;
     handledRef.current = true;
+    setAccepting(true);
 
     if (timerRef.current) clearInterval(timerRef.current);
     if (InCallManager) InCallManager.stopRingtone();
 
-    // Navigate FIRST — no await
+    try {
+      // Step 1 — unlock the caller (MUST be awaited)
+      await firestore()
+        .collection('calls')
+        .doc(callId)
+        .update({
+          status: 'answered',
+          answeredAt: firestore.FieldValue.serverTimestamp(),
+          [`participants.${user?.uid}.answeredAt`]:
+            firestore.FieldValue.serverTimestamp(),
+        });
+      console.log('[IncomingCall] status=answered written to Firestore');
+    } catch (err) {
+      console.error('[IncomingCall] Failed to write answered status:', err);
+      // Still navigate — call may still work if network recovers
+    }
+
+    // Step 2 — navigate into call screen
     const screen = type === 'video' ? 'videoCall' : 'voiceCall';
     navigation.replace(screen, {
       userData: { uid: callerId, name: callerName, profile_image: avatar },
@@ -108,15 +150,15 @@ const IncomingCallScreen = () => {
       callId,
     });
 
-    // Clear Firestore field in background AFTER navigation
+    // Step 3 — clear notification badge AFTER navigation (non-blocking)
     if (user) {
       notificationService.clearIncomingCall(user.uid).catch(() => {});
     }
   };
 
-  // ─────────────────────────────────────────────────────────────────────
-  //  REJECT - Enhanced to send proper notifications to both parties
-  // ─────────────────────────────────────────────────────────────────────
+  // ─────────────────────────────────────────────────────────────────────────
+  //  REJECT
+  // ─────────────────────────────────────────────────────────────────────────
   const rejectCall = async () => {
     if (handledRef.current) return;
     handledRef.current = true;
@@ -125,31 +167,30 @@ const IncomingCallScreen = () => {
     if (InCallManager) InCallManager.stopRingtone();
 
     try {
-      // Update call status to 'ended'
-      await firestore().collection('calls').doc(callId).update({
-        status: 'ended',
-        [`participants.${user?.uid}.rejectedAt`]: firestore.FieldValue.serverTimestamp(),
-        endedAt: firestore.FieldValue.serverTimestamp(),
-      });
+      await firestore()
+        .collection('calls')
+        .doc(callId)
+        .update({
+          status: 'ended',
+          [`participants.${user?.uid}.rejectedAt`]:
+            firestore.FieldValue.serverTimestamp(),
+          endedAt: firestore.FieldValue.serverTimestamp(),
+        });
 
-      // Send notification to caller that call was rejected
-      const callDoc = await firestore().collection('calls').doc(callId).get();
-      const participants = callDoc.data()?.participants || {};
-      const callerId = Object.keys(participants).find(uid =>
-        participants[uid].userId === callDoc.data()?.initiatedBy
-      );
-
-      if (callerId && callerId !== user?.uid) {
+      // Notify caller
+      const callSnap = await firestore().collection('calls').doc(callId).get();
+      const data = callSnap.data();
+      const initiator = data?.callerId ?? data?.initiatedBy;
+      if (initiator && initiator !== user?.uid) {
         await notificationService.sendMissedCallNotification({
-          receiverId: callerId,
-          callerName: callerName,
-          callId: callId
+          receiverId: initiator,
+          callerName,
+          callId,
         });
       }
-
       if (user) await notificationService.clearIncomingCall(user.uid);
     } catch (error) {
-      console.error('Error rejecting call:', error);
+      console.error('[IncomingCall] Error rejecting call:', error);
     }
 
     navigation.goBack();
@@ -160,7 +201,9 @@ const IncomingCallScreen = () => {
       <StatusBar hidden />
 
       <View style={styles.callerSection}>
-        <Animated.View style={[styles.avatarRing, { transform: [{ scale: pulseAnim }] }]}>
+        <Animated.View
+          style={[styles.avatarRing, { transform: [{ scale: pulseAnim }] }]}
+        >
           {avatar ? (
             <Image source={{ uri: avatar }} style={styles.avatar} />
           ) : (
@@ -175,7 +218,11 @@ const IncomingCallScreen = () => {
         <Text style={styles.callerName}>{callerName ?? 'Unknown'}</Text>
 
         <View style={styles.badge}>
-          <Feather name={type === 'video' ? 'video' : 'phone'} size={13} color="#fff" />
+          <Feather
+            name={type === 'video' ? 'video' : 'phone'}
+            size={13}
+            color="#fff"
+          />
           <Text style={styles.badgeText}>
             Incoming {type === 'video' ? 'video' : 'voice'} call
           </Text>
@@ -186,15 +233,37 @@ const IncomingCallScreen = () => {
 
       <View style={styles.actions}>
         <View style={styles.actionItem}>
-          <TouchableOpacity style={[styles.actionBtn, styles.declineBtn]} onPress={rejectCall} activeOpacity={0.8}>
+          <TouchableOpacity
+            style={[styles.actionBtn, styles.declineBtn]}
+            onPress={rejectCall}
+            activeOpacity={0.8}
+            disabled={accepting}
+          >
             <Feather name="phone-off" size={30} color="#fff" />
           </TouchableOpacity>
           <Text style={styles.actionLabel}>Decline</Text>
         </View>
 
         <View style={styles.actionItem}>
-          <TouchableOpacity style={[styles.actionBtn, styles.acceptBtn]} onPress={acceptCall} activeOpacity={0.8}>
-            <Feather name={type === 'video' ? 'video' : 'phone'} size={30} color="#fff" />
+          <TouchableOpacity
+            style={[
+              styles.actionBtn,
+              styles.acceptBtn,
+              accepting && styles.acceptBtnBusy,
+            ]}
+            onPress={acceptCall}
+            activeOpacity={0.8}
+            disabled={accepting}
+          >
+            {accepting ? (
+              <ActivityIndicator color="#fff" size="small" />
+            ) : (
+              <Feather
+                name={type === 'video' ? 'video' : 'phone'}
+                size={30}
+                color="#fff"
+              />
+            )}
           </TouchableOpacity>
           <Text style={styles.actionLabel}>Accept</Text>
         </View>
@@ -264,12 +333,18 @@ const styles = StyleSheet.create({
   },
   actionItem: { alignItems: 'center', gap: 10 },
   actionBtn: {
-    width: 76, height: 76, borderRadius: 38,
-    justifyContent: 'center', alignItems: 'center',
+    width: 76,
+    height: 76,
+    borderRadius: 38,
+    justifyContent: 'center',
+    alignItems: 'center',
     shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.5, shadowRadius: 8, elevation: 8,
+    shadowOpacity: 0.5,
+    shadowRadius: 8,
+    elevation: 8,
   },
   declineBtn: { backgroundColor: '#e53935', shadowColor: '#e53935' },
-  acceptBtn:  { backgroundColor: '#43a047', shadowColor: '#43a047' },
+  acceptBtn: { backgroundColor: '#43a047', shadowColor: '#43a047' },
+  acceptBtnBusy: { backgroundColor: '#2e7d32', shadowColor: '#2e7d32' },
   actionLabel: { color: '#aaa', fontSize: 13, fontWeight: '500' },
 });

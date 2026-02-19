@@ -28,7 +28,7 @@ import firestore, {
   getDocs,
   query,
   where,
-  FieldValue
+  FieldValue,
 } from '@react-native-firebase/firestore';
 import { getUserAvatar } from '../../shared/utils/avatarUtils';
 import {
@@ -51,7 +51,8 @@ interface Message {
 }
 
 const UserMessage = ({ route }: Props) => {
-  const navigation = useNavigation<NativeStackScreenProps<AppStackParamList>['navigation']>();
+  const navigation =
+    useNavigation<NativeStackScreenProps<AppStackParamList>['navigation']>();
   const { userData } = route.params;
   const { user, userProfile } = useAuth();
 
@@ -123,11 +124,13 @@ const UserMessage = ({ route }: Props) => {
     console.log('=== INITIATING VIDEO CALL ===');
     console.log('Caller:', user?.uid);
     console.log('Receiver:', userData.uid);
-    
+
     try {
       // Generate call ID
-      const callId = `call_${[user!.uid, userData.uid].sort().join('_')}_${Date.now()}`;
-      
+      const callId = `call_${[user!.uid, userData.uid]
+        .sort()
+        .join('_')}_${Date.now()}`;
+
       // Send notification to receiver
       await notificationService.sendCallNotification({
         receiverId: userData.uid,
@@ -137,29 +140,36 @@ const UserMessage = ({ route }: Props) => {
         callId: callId,
         callType: 'video',
       });
-      
+
+      navigation.navigate('videoCall', {
+        userData: {
+          uid: userData.uid,
+          name: userData.name,
+          profile_image: userData.profile_image,
+        },
+        isIncomingCall: false,
+      });
       console.log('✅ Call notification sent successfully');
-      Alert.alert(
-        'Calling...', 
-        `Calling ${userData.name}. Please wait for them to answer.`,
-        [
-          {
-            text: 'Cancel',
-            style: 'cancel',
-            onPress: async () => {
-              console.log('User cancelled the call');
-              try {
-                // Cancel the call notification
-                await notificationService.cancelCallNotification(callId, userData.uid);
-                console.log('✅ Call cancelled successfully');
-              } catch (error) {
-                console.error('❌ Error cancelling call:', error);
-              }
-            }
-          }
-        ]
-      );
-      
+      // Alert.alert(
+      //   'Calling...',
+      //   `Calling ${userData.name}. Please wait for them to answer.`,
+      //   [
+      //     {
+      //       text: 'Cancel',
+      //       style: 'cancel',
+      //       onPress: async () => {
+      //         console.log('User cancelled the call');
+      //         try {
+      //           // Cancel the call notification
+      //           await notificationService.cancelCallNotification(callId, userData.uid);
+      //           console.log('✅ Call cancelled successfully');
+      //         } catch (error) {
+      //           console.error('❌ Error cancelling call:', error);
+      //         }
+      //       }
+      //     }
+      //   ]
+      // );
     } catch (error) {
       console.error('❌ Error initiating call:', error);
       Alert.alert('Error', 'Failed to initiate call. Please try again.');
@@ -170,11 +180,13 @@ const UserMessage = ({ route }: Props) => {
     console.log('=== INITIATING VOICE CALL ===');
     console.log('Caller:', user?.uid);
     console.log('Receiver:', userData.uid);
-    
+
     try {
       // Generate call ID
-      const callId = `call_${[user!.uid, userData.uid].sort().join('_')}_${Date.now()}`;
-      
+      const callId = `call_${[user!.uid, userData.uid]
+        .sort()
+        .join('_')}_${Date.now()}`;
+
       // Send notification to receiver
       await notificationService.sendCallNotification({
         receiverId: userData.uid,
@@ -184,29 +196,37 @@ const UserMessage = ({ route }: Props) => {
         callId: callId,
         callType: 'audio',
       });
-      
+
+      navigation.navigate('voiceCall', {
+        userData: {
+          uid: userData.uid,
+          name: userData.name,
+          profile_image: userData.profile_image,
+        },
+        isIncomingCall: false,
+      });
+
       console.log('✅ Voice call notification sent successfully');
-      Alert.alert(
-        'Calling...', 
-        `Calling ${userData.name}. Please wait for them to answer.`,
-        [
-          {
-            text: 'Cancel',
-            style: 'cancel',
-            onPress: async () => {
-              console.log('User cancelled the voice call');
-              try {
-                // Cancel the call notification
-                await notificationService.cancelCallNotification(callId, userData.uid);
-                console.log('✅ Voice call cancelled successfully');
-              } catch (error) {
-                console.error('❌ Error cancelling voice call:', error);
-              }
-            }
-          }
-        ]
-      );
-      
+      // Alert.alert(
+      //   'Calling...',
+      //   `Calling ${userData.name}. Please wait for them to answer.`,
+      //   [
+      //     {
+      //       text: 'Cancel',
+      //       style: 'cancel',
+      //       onPress: async () => {
+      //         console.log('User cancelled the voice call');
+      //         try {
+      //           // Cancel the call notification
+      //           await notificationService.cancelCallNotification(callId, userData.uid);
+      //           console.log('✅ Voice call cancelled successfully');
+      //         } catch (error) {
+      //           console.error('❌ Error cancelling voice call:', error);
+      //         }
+      //       }
+      //     }
+      //   ]
+      // );
     } catch (error) {
       console.error('❌ Error initiating voice call:', error);
       Alert.alert('Error', 'Failed to initiate voice call. Please try again.');
@@ -227,7 +247,7 @@ const UserMessage = ({ route }: Props) => {
       // Remove current user from deleted_for_users array to "undelete" the conversation
       const chatDocRef = firestore().doc(`chats/${chatId}`);
       const chatDoc = await chatDocRef.get();
-      
+
       // Check if chatDoc is null (Firebase error)
       if (!chatDoc) {
         console.log('❌ Firestore document query returned null');
@@ -266,7 +286,7 @@ const UserMessage = ({ route }: Props) => {
       // Remove current user from deleted_for_users array to "undelete" the conversation
       const chatDocRef = firestore().doc(`chats/${chatId}`);
       const chatDoc = await chatDocRef.get();
-      
+
       // Check if chatDoc is null (Firebase error)
       if (!chatDoc) {
         console.log('❌ Firestore document query returned null');
@@ -461,13 +481,13 @@ const UserMessage = ({ route }: Props) => {
         );
 
         const snapshot = await getDocs(q);
-        
+
         // Check if snapshot is null (Firebase error)
         if (!snapshot) {
           console.log('❌ Firestore query returned null');
           return;
         }
-        
+
         console.log(`Found ${snapshot.size} unread messages to mark as read`);
 
         if (snapshot.empty) {
@@ -594,9 +614,7 @@ const UserMessage = ({ route }: Props) => {
 
             <TouchableOpacity
               style={{ width: '60%' }}
-              onPress={() =>
-                navigation.navigate('userProfile', { userData })
-              }
+              onPress={() => navigation.navigate('userProfile', { userData })}
             >
               <View>
                 <Text style={styles.headerName}>{userData.name}</Text>
@@ -617,9 +635,7 @@ const UserMessage = ({ route }: Props) => {
               <TouchableOpacity onPress={handleVoiceCall}>
                 <Feather name="phone" size={24} color="#000" />
               </TouchableOpacity>
-              <TouchableOpacity
-                onPress={handleVideoCall}
-              >
+              <TouchableOpacity onPress={handleVideoCall}>
                 <Feather name="video" size={24} color="#000" />
               </TouchableOpacity>
             </View>
@@ -930,5 +946,5 @@ const styles = StyleSheet.create({
     width: 200,
     height: 200,
     borderRadius: 8,
-  }, 
+  },
 });

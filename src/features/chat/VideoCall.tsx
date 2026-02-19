@@ -1,5 +1,3 @@
- 
-
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   View,
@@ -31,12 +29,11 @@ try {
 } catch (_) {}
 
 const { width, height } = Dimensions.get('window');
-
-const PIP_W = 110;
-const PIP_H = 150;
-const PIP_MARGIN = 16;
-const PIP_INIT_X = width - PIP_W - PIP_MARGIN;
-const PIP_INIT_Y = 80;
+const PIP_W = 110,
+  PIP_H = 150,
+  PIP_MARGIN = 16;
+const PIP_INIT_X = width - PIP_W - PIP_MARGIN,
+  PIP_INIT_Y = 80;
 
 type ConnectionState =
   | 'initializing'
@@ -49,18 +46,14 @@ type ConnectionState =
   | 'closed';
 
 const STATUS_LABEL: Record<string, string> = {
-  initializing: 'Initializing call…',
-  new: 'Setting up connection…',
+  initializing: 'Initializing…',
+  new: 'Setting up…',
   checking: 'Checking connection…',
   connecting: 'Connecting to peer…',
   connected: '',
   disconnected: 'Reconnecting…',
   failed: 'Connection failed',
   closed: 'Call ended',
-  calling: 'Calling…',
-  receiving: 'Receiving call…',
-  answer_sent: 'Answer sent, connecting…',
-  answer_received: 'Answer received, connecting…',
 };
 
 const VideoCall = () => {
@@ -96,12 +89,12 @@ const VideoCall = () => {
   const callTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const controlsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const controlsOpacity = useRef(new Animated.Value(1)).current;
-
-  // Holds an offer that arrived before the PC + stream were ready (callee race)
+  const callTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const acceptListenerRef = useRef<(() => void) | null>(null);
+  const cleanedRef = useRef(false);
   const pendingOfferRef = useRef<any>(null);
-  const readyToAnswerRef = useRef(false); // true once addLocalStream() done
+  const readyToAnswerRef = useRef(false);
 
-  // ── PiP drag ─────────────────────────────────────────────────────────
   const pipPan = useRef(
     new Animated.ValueXY({ x: PIP_INIT_X, y: PIP_INIT_Y }),
   ).current;
@@ -120,8 +113,8 @@ const VideoCall = () => {
       ),
       onPanResponderRelease: () => {
         pipPan.flattenOffset();
-        const cx = (pipPan.x as any)._value;
-        const cy = (pipPan.y as any)._value;
+        const cx = (pipPan.x as any)._value,
+          cy = (pipPan.y as any)._value;
         Animated.spring(pipPan, {
           toValue: {
             x: cx < width / 2 ? PIP_MARGIN : width - PIP_W - PIP_MARGIN,
@@ -135,7 +128,6 @@ const VideoCall = () => {
     }),
   ).current;
 
-  // ── Controls visibility ───────────────────────────────────────────────
   const showControls = useCallback(() => {
     if (controlsTimerRef.current) clearTimeout(controlsTimerRef.current);
     setControlsVisible(true);
@@ -169,7 +161,7 @@ const VideoCall = () => {
     }
   }, [connectionState]);
 
-  // ── INIT ─────────────────────────────────────────────────────────────
+  // ── INIT ─────────────────────────────────────────────────────────────────
   useEffect(() => {
     let cancelled = false;
 
@@ -177,39 +169,35 @@ const VideoCall = () => {
       try {
         await requestPermissions();
 
+        // Callee uses the callId passed from IncomingCallScreen.
+        // Caller generates a fresh Firestore doc ID.
         const callId =
-          isIncomingCall && incomingCallId ? incomingCallId : generateCallId();
+          isIncomingCall && incomingCallId
+            ? incomingCallId
+            : firestore().collection('calls').doc().id;
         callIdRef.current = callId;
 
-        const isCaller = isIncomingCall ? false : await checkIfCaller(callId);
+        const isCaller = !isIncomingCall;
         isCallerRef.current = isCaller;
 
-        // Build service — pass handleOfferReceived for callee, undefined for caller
+        console.log(`[VideoCall] init — isCaller:${isCaller} callId:${callId}`);
+
         const service = new FirebaseWebRTCService(
           callId,
           user!.uid,
           (stream: MediaStream) => {
             if (!cancelled) {
-              console.log('VideoCall: Remote stream received');
-              console.log('VideoCall: Stream tracks:', stream.getTracks().map(t => t.kind));
+              console.log('[VideoCall] Remote stream received');
               setRemoteStream(stream);
-              console.log('VideoCall: Remote stream set successfully');
             }
           },
           (state: string) => {
             if (!cancelled) {
-              console.log('VideoCall: Connection state changed to:', state);
+              console.log('[VideoCall] Connection state →', state);
               setConnectionState(state as ConnectionState);
-              // Update call status based on connection state
-              if (state === 'connected') {
-                setCallStatus('connected');
-                console.log('VideoCall: Call connected successfully');
-              } else if (state === 'failed' || state === 'disconnected') {
-                setCallStatus(state);
-                console.log('VideoCall: Connection issue:', state);
-              } else if (state === 'connecting' || state === 'checking') {
-                setCallStatus('connecting');
-              }
+              if (state === 'connected') setCallStatus('connected');
+              if (state === 'closed')
+                doCleanup().then(() => navigation.goBack());
             }
           },
           (err: string) => {
@@ -219,46 +207,151 @@ const VideoCall = () => {
         );
         webRTCServiceRef.current = service;
 
-        // Initialize (builds PC + Firestore listeners)
-        await service.initialize(isCaller);
-
-        // Get camera/mic
-        const stream = await getLocalStream();
-        if (cancelled) {
-          stream.getTracks().forEach(t => t.stop());
-          return;
-        }
-        localStreamRef.current = stream;
-        setLocalStream(stream);
-        await service.addLocalStream(stream);
-
-        // ✅ Mark ready — if offer arrived while we were setting up, process it now
-        readyToAnswerRef.current = true;
-        if (!isCaller && pendingOfferRef.current) {
-          console.log('Processing queued offer');
-          await service.handleRemoteOffer(pendingOfferRef.current);
-          pendingOfferRef.current = null;
-        }
-
-        if (InCallManager) {
-          InCallManager.start({ media: 'video' });
-          InCallManager.setForceSpeakerphoneOn(true);
-        }
-
+        // ── CALLER ─────────────────────────────────────────────────────────
         if (isCaller) {
           setCallStatus('calling');
-          await service.createOffer();
-          await sendCallNotification(callId);
+
+          // Step 1: Create call doc + signal callee BEFORE initialize().
+          //         This guarantees the doc exists when initialize() merges
+          //         the caller participant entry into it.
+          const callerName =
+            userProfile?.name || user?.displayName || user?.email || 'User';
+          await notificationService.sendCallNotification({
+            receiverId: userData.uid,
+            callerId: user!.uid,
+            callerName,
+            callerAvatar: userProfile?.profile_image,
+            callId,
+            callType: 'video',
+          });
+          console.log('[VideoCall] Call notification sent');
+
+          if (cancelled) return;
+
+          // Step 2: initialize() merges caller participant into the existing doc
+          await service.initialize(true);
+          console.log('[VideoCall] Caller initialized');
+
+          if (cancelled) return;
+
+          // Step 3: Camera + mic
+          const stream = await getLocalStream();
+          if (cancelled) {
+            stream.getTracks().forEach(t => t.stop());
+            return;
+          }
+          localStreamRef.current = stream;
+          setLocalStream(stream);
+          await service.addLocalStream(stream);
+
+          if (InCallManager) {
+            InCallManager.start({ media: 'video' });
+            InCallManager.setForceSpeakerphoneOn(true);
+          }
+
+          // Step 4: 60-second no-answer timeout
+          callTimeoutRef.current = setTimeout(() => {
+            if (cancelled) return;
+            Alert.alert('No Answer', 'The call was not answered.', [
+              {
+                text: 'OK',
+                onPress: () => {
+                  doCleanup();
+                  navigation.goBack();
+                },
+              },
+            ]);
+          }, 60000);
+
+          // Step 5: Wait for callee to accept (status='answered'), then offer
+          acceptListenerRef.current = firestore()
+            .collection('calls')
+            .doc(callId)
+            .onSnapshot(doc => {
+              if (cancelled) return;
+              const status = doc.data()?.status;
+              console.log('[VideoCall] Call doc status →', status);
+
+              if (status === 'answered') {
+                if (callTimeoutRef.current) {
+                  clearTimeout(callTimeoutRef.current);
+                  callTimeoutRef.current = null;
+                }
+                const unsub = acceptListenerRef.current;
+                acceptListenerRef.current = null;
+                unsub?.();
+
+                setConnectionState('connecting');
+                setCallStatus('connecting');
+
+                console.log('[VideoCall] Callee answered — creating offer');
+                service.createOffer(false).catch(err => {
+                  if (!cancelled) {
+                    console.error('[VideoCall] createOffer failed:', err);
+                    handleError('Failed to start call: ' + err.message);
+                  }
+                });
+              } else if (status === 'ended') {
+                if (callTimeoutRef.current) {
+                  clearTimeout(callTimeoutRef.current);
+                  callTimeoutRef.current = null;
+                }
+                const unsub = acceptListenerRef.current;
+                acceptListenerRef.current = null;
+                unsub?.();
+                if (!cancelled) doCleanup().then(() => navigation.goBack());
+              }
+            });
+
+          // ── CALLEE ─────────────────────────────────────────────────────────
         } else {
           setCallStatus('receiving');
-        }
-      } catch (err) {
-        if (!cancelled) {
-          console.error('Call init error:', err);
-          Alert.alert(
-            'Error',
-            'Could not start call: ' + (err as Error).message,
+
+          // Step 1: initialize() — only writes participant metadata, not status
+          await service.initialize(false);
+          console.log('[VideoCall] Callee initialized');
+
+          if (cancelled) return;
+
+          // Step 2: Camera + mic
+          const stream = await getLocalStream();
+          if (cancelled) {
+            stream.getTracks().forEach(t => t.stop());
+            return;
+          }
+          localStreamRef.current = stream;
+          setLocalStream(stream);
+          await service.addLocalStream(stream);
+
+          // Step 3: Mark ready, drain pending offer if already arrived
+          readyToAnswerRef.current = true;
+          console.log(
+            '[VideoCall] Callee ready. Pending offer:',
+            !!pendingOfferRef.current,
           );
+          if (pendingOfferRef.current) {
+            await service.handleRemoteOffer(pendingOfferRef.current);
+            pendingOfferRef.current = null;
+          }
+
+          if (InCallManager) {
+            InCallManager.start({ media: 'video' });
+            InCallManager.setForceSpeakerphoneOn(true);
+          }
+
+          // Watch for caller cancelling
+          const unsubCancel = notificationService.listenForCallCancellation(
+            callId,
+            () => {
+              if (!cancelled) doCleanup().then(() => navigation.goBack());
+            },
+          );
+          (callIdRef as any).cancelUnsub = unsubCancel;
+        }
+      } catch (err: any) {
+        if (!cancelled) {
+          console.error('[VideoCall] Init error:', err);
+          Alert.alert('Error', 'Could not start call: ' + err.message);
           navigation.goBack();
         }
       }
@@ -271,7 +364,7 @@ const VideoCall = () => {
     };
   }, []);
 
-  // ── Duration timer ────────────────────────────────────────────────────
+  // ── Duration timer ────────────────────────────────────────────────────────
   useEffect(() => {
     if (connectionState === 'connected') {
       callTimerRef.current = setInterval(
@@ -290,12 +383,15 @@ const VideoCall = () => {
     };
   }, [connectionState]);
 
-  // ── Offer handler (callee) ────────────────────────────────────────────
-  // ✅ KEY FIX: if called before PC + stream are ready, queue it.
+  // ── Offer handler (callee only) ───────────────────────────────────────────
   const handleOfferReceived = async (offerData: any) => {
+    console.log(
+      '[VideoCall] Offer arrived. ready:',
+      readyToAnswerRef.current,
+      'has offer:',
+      !!offerData?.offer,
+    );
     if (!readyToAnswerRef.current) {
-      // PC or stream not ready yet — queue and process after addLocalStream()
-      console.log('Offer arrived early — queuing');
       pendingOfferRef.current = offerData.offer;
       return;
     }
@@ -309,17 +405,34 @@ const VideoCall = () => {
   const handleError = (error: string) => {
     if (!error.includes('disconnected') && !error.includes('closed')) {
       Alert.alert('Call Error', error, [
-        { text: 'End Call', onPress: () => navigation.goBack() },
+        {
+          text: 'End Call',
+          onPress: () => doCleanup().then(() => navigation.goBack()),
+        },
       ]);
     }
   };
 
-  // ── Cleanup ───────────────────────────────────────────────────────────
+  // ── Cleanup ───────────────────────────────────────────────────────────────
   const doCleanup = async () => {
+    if (cleanedRef.current) return;
+    cleanedRef.current = true;
     if (controlsTimerRef.current) clearTimeout(controlsTimerRef.current);
     if (callTimerRef.current) clearInterval(callTimerRef.current);
+    if (callTimeoutRef.current) {
+      clearTimeout(callTimeoutRef.current);
+      callTimeoutRef.current = null;
+    }
+    if (acceptListenerRef.current) {
+      acceptListenerRef.current();
+      acceptListenerRef.current = null;
+    }
+    const cancelUnsub = (callIdRef as any).cancelUnsub;
+    if (cancelUnsub) {
+      cancelUnsub();
+      (callIdRef as any).cancelUnsub = null;
+    }
     if (InCallManager) InCallManager.stop();
-
     if (webRTCServiceRef.current) {
       await webRTCServiceRef.current.endCall();
       webRTCServiceRef.current = null;
@@ -328,15 +441,16 @@ const VideoCall = () => {
       localStreamRef.current.getTracks().forEach(t => t.stop());
       localStreamRef.current = null;
     }
-    if (!isCallerRef.current && callIdRef.current && user) {
-      try {
+    try {
+      if (!isCallerRef.current && user)
         await notificationService.clearIncomingCall(user.uid);
+      else if (isCallerRef.current && userData?.uid)
         await notificationService.cancelCallNotification(
           callIdRef.current,
-          user.uid,
+          userData.uid,
         );
-      } catch (_) {}
-    }
+    } catch (_) {}
+    notificationService.resetCallState();
   };
 
   const endCall = async () => {
@@ -344,38 +458,33 @@ const VideoCall = () => {
     navigation.goBack();
   };
 
-  // ── Controls ──────────────────────────────────────────────────────────
   const toggleMute = () => {
     localStreamRef.current?.getAudioTracks().forEach(t => {
       t.enabled = !t.enabled;
     });
     setIsMuted(m => !m);
   };
-
   const toggleVideo = () => {
     localStreamRef.current?.getVideoTracks().forEach(t => {
       t.enabled = !t.enabled;
     });
     setIsVideoOff(v => !v);
   };
-
   const toggleSpeaker = () => {
     if (InCallManager) {
-      const next = !isSpeaker;
-      InCallManager.setForceSpeakerphoneOn(next);
-      setIsSpeaker(next);
+      const n = !isSpeaker;
+      InCallManager.setForceSpeakerphoneOn(n);
+      setIsSpeaker(n);
     }
   };
-
   const switchCamera = () => {
-    const track = localStreamRef.current?.getVideoTracks()[0] as any;
-    if (track?._switchCamera) {
-      track._switchCamera();
+    const t = localStreamRef.current?.getVideoTracks()[0] as any;
+    if (t?._switchCamera) {
+      t._switchCamera();
       setIsFrontCamera(f => !f);
     }
   };
 
-  // ── Helpers ───────────────────────────────────────────────────────────
   const requestPermissions = async () => {
     if (Platform.OS === 'android') {
       const r = await PermissionsAndroid.requestMultiple([
@@ -387,20 +496,6 @@ const VideoCall = () => {
         r['android.permission.RECORD_AUDIO'] !== 'granted'
       )
         throw new Error('Camera and microphone permissions are required.');
-    }
-  };
-
-  const generateCallId = () => {
-    const ids = [user!.uid, userData.uid].sort();
-    return `call_${ids.join('_')}_${Date.now()}`;
-  };
-
-  const checkIfCaller = async (callId: string): Promise<boolean> => {
-    try {
-      const d = await firestore().collection('calls').doc(callId).get();
-      return !d.exists;
-    } catch {
-      return true;
     }
   };
 
@@ -417,35 +512,22 @@ const VideoCall = () => {
     return s as unknown as MediaStream;
   };
 
-  const sendCallNotification = async (callId: string) => {
-    const callerName =
-      userProfile?.name || user?.displayName || user?.email || 'User';
-    await notificationService.sendCallNotification({
-      receiverId: userData.uid,
-      callerId: user!.uid,
-      callerName,
-      callerAvatar: userProfile?.profile_image,
-      callId,
-      callType: 'video',
-    });
-  };
-
   const formatTime = (s: number) =>
     `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(
       2,
       '0',
     )}`;
 
-  // ── Render ────────────────────────────────────────────────────────────
-  const statusLabel = STATUS_LABEL[connectionState] ?? connectionState;
+  // ── Render ────────────────────────────────────────────────────────────────
   const isConnected = connectionState === 'connected';
+  const isRinging = callStatus === 'calling';
+  const statusLabel = STATUS_LABEL[connectionState] ?? connectionState;
 
   return (
     <TouchableWithoutFeedback onPress={showControls}>
       <View style={styles.root}>
         <StatusBar hidden />
 
-        {/* Remote */}
         {remoteStream ? (
           <RTCView
             streamURL={remoteStream.toURL()}
@@ -462,19 +544,23 @@ const VideoCall = () => {
             <Text style={styles.remoteNameText}>
               {userData?.name ?? 'User'}
             </Text>
-            <Text style={styles.statusLabel}>{statusLabel}</Text>
+            <Text style={styles.statusLabel}>
+              {isRinging ? 'Ringing…' : statusLabel}
+            </Text>
           </View>
         )}
 
-        {/* Top bar */}
         <Animated.View style={[styles.topBar, { opacity: controlsOpacity }]}>
           <Text style={styles.remoteName}>{userData?.name ?? 'User'}</Text>
           <Text style={styles.duration}>
-            {isConnected ? formatTime(callDuration) : statusLabel}
+            {isConnected
+              ? formatTime(callDuration)
+              : isRinging
+              ? 'Ringing…'
+              : statusLabel}
           </Text>
         </Animated.View>
 
-        {/* PiP */}
         <Animated.View
           style={[
             styles.pipContainer,
@@ -498,7 +584,6 @@ const VideoCall = () => {
           )}
         </Animated.View>
 
-        {/* Controls */}
         {controlsVisible && (
           <Animated.View
             style={[styles.controls, { opacity: controlsOpacity }]}
@@ -547,7 +632,6 @@ const VideoCall = () => {
   );
 };
 
-// Small reusable button
 interface CBProps {
   icon: string;
   iconName?: string;
