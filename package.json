@@ -34,6 +34,8 @@
     "react-native-image-resizer": "^1.4.5",
     "react-native-incall-manager": "^4.2.1",
     "react-native-linear-gradient": "^2.8.3",
+    "react-native-nitro-modules": "^0.33.9",
+    "react-native-nitro-sound": "^0.2.10",
     "react-native-reanimated": "^4.2.1",
     "react-native-safe-area-context": "^5.6.2",
     "react-native-screens": "^4.22.0",

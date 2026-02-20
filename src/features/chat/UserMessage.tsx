@@ -6,15 +6,17 @@ import {
   Image,
   FlatList,
   TouchableOpacity,
+  TouchableWithoutFeedback,
   StatusBar,
   Alert,
   KeyboardAvoidingView,
   Platform,
   PermissionsAndroid,
+  Linking,
+  Animated,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Feather from 'react-native-vector-icons/Feather';
-import AntDesign from 'react-native-vector-icons/AntDesign';
 import Entypo from 'react-native-vector-icons/Entypo';
 import MaterialIcons from 'react-native-vector-icons/MaterialIcons';
 import { useNavigation } from '@react-navigation/native';
@@ -28,14 +30,15 @@ import firestore, {
   getDocs,
   query,
   where,
-  FieldValue,
 } from '@react-native-firebase/firestore';
-import { getUserAvatar } from '../../shared/utils/avatarUtils';
 import {
   launchImageLibrary,
   launchCamera,
   MediaType,
 } from 'react-native-image-picker';
+
+import Sound from 'react-native-nitro-sound';
+import RNFS from 'react-native-fs';
 
 type Props = NativeStackScreenProps<AppStackParamList, 'userMsg'>;
 
@@ -46,8 +49,12 @@ interface Message {
   text: string;
   timestamp: any;
   read: boolean;
-  type?: 'text' | 'image';
-  imageData?: string; // Base64 image data
+  type?: 'text' | 'image' | 'audio';
+  imageData?: string;
+  audioData?: string;
+  audioDuration?: number;
+  deleted?: boolean;
+  deleted_for?: string[];
 }
 
 const UserMessage = ({ route }: Props) => {
@@ -60,15 +67,65 @@ const UserMessage = ({ route }: Props) => {
   const [inputText, setInputText] = useState('');
   const [isFocused, setIsFocused] = useState(false);
   const [hasCameraPermission, setHasCameraPermission] = useState(false);
-  const [isSendingImage, setIsSendingImage] = useState(false); // Track image sending state
+  const [isSendingImage, setIsSendingImage] = useState(false);
+
+  // Voice recording states
+  const [isRecording, setIsRecording] = useState(false);
+  const [recordSecs, setRecordSecs] = useState(0);
+  const [isSendingAudio, setIsSendingAudio] = useState(false);
+  const recordingPath = useRef<string>('');
+  const isLongPress = useRef(false);
+  const pulseAnim = useRef(new Animated.Value(1)).current;
+  const pulseLoop = useRef<Animated.CompositeAnimation | null>(null);
+
+  // Audio playback states
+  const [playingMessageId, setPlayingMessageId] = useState<string | null>(null);
+  const [playbackPosition, setPlaybackPosition] = useState<
+    Record<string, number>
+  >({});
+
+  // Selected message for delete
+  const [selectedMessageId, setSelectedMessageId] = useState<string | null>(
+    null,
+  );
 
   const flatListRef = useRef<FlatList>(null);
 
-  // Request camera permission on component mount
   useEffect(() => {
     requestCameraPermission();
+    return () => {
+      Sound.stopRecorder().catch(() => {});
+      Sound.stopPlayer().catch(() => {});
+      Sound.removeRecordBackListener();
+      Sound.removePlayBackListener();
+    };
   }, []);
 
+  // ─── Pulse animation for recording dot ───────────────────────────────────────
+  const startPulse = () => {
+    pulseLoop.current = Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulseAnim, {
+          toValue: 0.3,
+          duration: 500,
+          useNativeDriver: true,
+        }),
+        Animated.timing(pulseAnim, {
+          toValue: 1,
+          duration: 500,
+          useNativeDriver: true,
+        }),
+      ]),
+    );
+    pulseLoop.current.start();
+  };
+
+  const stopPulse = () => {
+    pulseLoop.current?.stop();
+    pulseAnim.setValue(1);
+  };
+
+  // ─── Permissions ──────────────────────────────────────────────────────────────
   const requestCameraPermission = async (): Promise<boolean> => {
     if (Platform.OS === 'android') {
       try {
@@ -76,71 +133,312 @@ const UserMessage = ({ route }: Props) => {
           PermissionsAndroid.PERMISSIONS.CAMERA,
           {
             title: 'Camera Permission',
-            message: 'This app needs access to your camera to take photos',
+            message: 'This app needs access to your camera to capture photos',
             buttonNeutral: 'Ask Me Later',
             buttonNegative: 'Cancel',
             buttonPositive: 'OK',
           },
         );
         if (granted === PermissionsAndroid.RESULTS.GRANTED) {
-          console.log('Camera permission granted');
           setHasCameraPermission(true);
           return true;
         } else {
-          console.log('Camera permission denied');
           Alert.alert(
-            'Permission Denied',
-            'Camera permission is required to take photos',
+            'Permission Required',
+            'Camera permission is required. Please enable it in Settings.',
+            [
+              { text: 'Cancel', style: 'cancel' },
+              { text: 'Go to Settings', onPress: () => Linking.openSettings() },
+            ],
           );
           return false;
         }
       } catch (err) {
-        console.warn(err);
         return false;
       }
     } else {
-      // iOS handles permissions differently, usually granted during app installation
       setHasCameraPermission(true);
       return true;
     }
   };
 
-  // Listen to messages
+  const requestMicrophonePermission = async (): Promise<boolean> => {
+    if (Platform.OS === 'android') {
+      try {
+        const granted = await PermissionsAndroid.request(
+          PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
+          {
+            title: 'Microphone Permission',
+            message:
+              'This app needs microphone access to record voice messages',
+            buttonNeutral: 'Ask Me Later',
+            buttonNegative: 'Cancel',
+            buttonPositive: 'OK',
+          },
+        );
+        if (granted === PermissionsAndroid.RESULTS.GRANTED) {
+          return true;
+        } else {
+          Alert.alert(
+            'Permission Required',
+            'Microphone permission is required to record voice messages.',
+            [
+              { text: 'Cancel', style: 'cancel' },
+              { text: 'Go to Settings', onPress: () => Linking.openSettings() },
+            ],
+          );
+          return false;
+        }
+      } catch (err) {
+        return false;
+      }
+    }
+    return true;
+  };
+
+  // ─── Listen to messages ───────────────────────────────────────────────────────
   useEffect(() => {
     if (!user) return;
-
     const chatId = chatService.getChatId(user.uid, userData.uid);
     const unsubscribe = chatService.listenToMessages(chatId, newMessages => {
       setMessages(newMessages);
-      setTimeout(() => {
-        flatListRef.current?.scrollToEnd({ animated: true });
-      }, 100);
+      setTimeout(
+        () => flatListRef.current?.scrollToEnd({ animated: true }),
+        100,
+      );
     });
-
     return () => unsubscribe();
   }, [user, userData]);
 
-  const handleVideoCall = async () => {
-    console.log('=== INITIATING VIDEO CALL ===');
-    console.log('Caller:', user?.uid);
-    console.log('Receiver:', userData.uid);
+  // ─── Mark messages as read ────────────────────────────────────────────────────
+  useEffect(() => {
+    if (!user) return;
+    const chatId = chatService.getChatId(user.uid, userData.uid);
+    const markMessagesAsRead = async () => {
+      try {
+        const messagesRef = firestore()
+          .collection('chats')
+          .doc(chatId)
+          .collection('messages');
+        const q = query(
+          messagesRef,
+          where('receiverId', '==', user.uid),
+          where('read', '==', false),
+        );
+        const snapshot = await getDocs(q);
+        if (!snapshot || snapshot.empty) return;
+        const batch = firestore().batch();
+        snapshot.forEach((doc: any) => batch.update(doc.ref, { read: true }));
+        await batch.commit();
+      } catch (error) {
+        console.error('Error marking messages as read:', error);
+      }
+    };
+    markMessagesAsRead();
+  }, [user, userData.uid]);
+
+  // ─── Voice recording ──────────────────────────────────────────────────────────
+  const startRecording = async () => {
+    const hasPermission = await requestMicrophonePermission();
+    if (!hasPermission) return;
 
     try {
-      // Generate call ID
+      const path =
+        Platform.OS === 'android'
+          ? `${RNFS.CachesDirectoryPath}/voice_${Date.now()}.mp4`
+          : `${RNFS.CachesDirectoryPath}/voice_${Date.now()}.m4a`;
+
+      recordingPath.current = path;
+
+      // ✅ FIX 5: Sound.startRecorder
+      await Sound.startRecorder(path);
+      Sound.addRecordBackListener(e => {
+        setRecordSecs(Math.floor(e.currentPosition / 1000));
+      });
+
+      setIsRecording(true);
+      isLongPress.current = true;
+      startPulse();
+    } catch (error) {
+      console.error('Failed to start recording:', error);
+      Alert.alert('Error', 'Failed to start recording. Please try again.');
+    }
+  };
+
+  const stopAndSendRecording = async () => {
+    if (!isRecording) return;
+    stopPulse();
+    try {
+      // ✅ FIX 6: Sound.stopRecorder
+      const result = await Sound.stopRecorder();
+      Sound.removeRecordBackListener();
+      const currentSecs = recordSecs;
+      setIsRecording(false);
+      setRecordSecs(0);
+      isLongPress.current = false;
+
+      if (currentSecs < 1) {
+        Alert.alert('Too short', 'Hold longer to record a voice message.');
+        return;
+      }
+
+      await handleSendAudio(result, currentSecs);
+    } catch (error) {
+      console.error('Failed to stop recording:', error);
+      setIsRecording(false);
+      setRecordSecs(0);
+    }
+  };
+
+  const cancelRecording = async () => {
+    if (!isRecording) return;
+    stopPulse();
+    try {
+      // ✅ FIX 7: Sound.stopRecorder
+      await Sound.stopRecorder();
+      Sound.removeRecordBackListener();
+      setIsRecording(false);
+      setRecordSecs(0);
+      isLongPress.current = false;
+    } catch (error) {
+      console.error('Failed to cancel recording:', error);
+      setIsRecording(false);
+    }
+  };
+
+  const handleSendAudio = async (filePath: string, duration: number) => {
+    if (!user || isSendingAudio) return;
+    try {
+      setIsSendingAudio(true);
+      const base64Audio = await RNFS.readFile(filePath, 'base64');
+
+      const chatId = chatService.getChatId(user.uid, userData.uid);
+      const chatDocRef = firestore().doc(`chats/${chatId}`);
+      const chatDoc = await chatDocRef.get();
+      if (chatDoc && chatDoc.exists()) {
+        const chatData = chatDoc.data();
+        if (chatData?.deleted_for_users?.includes(user.uid)) {
+          await chatDocRef.update({
+            deleted_for_users: firestore.FieldValue.arrayRemove(user.uid),
+          });
+        }
+      }
+
+      await chatService.sendMessage(
+        user.uid,
+        userData.uid,
+        'Voice Message',
+        undefined,
+        base64Audio,
+        duration,
+      );
+      setTimeout(
+        () => flatListRef.current?.scrollToEnd({ animated: true }),
+        100,
+      );
+    } catch (error) {
+      console.error('Error sending audio:', error);
+      Alert.alert(
+        'Error',
+        'Failed to send voice message: ' + (error as Error).message,
+      );
+    } finally {
+      setIsSendingAudio(false);
+    }
+  };
+
+  // ─── Audio playback ───────────────────────────────────────────────────────────
+  const handlePlayAudio = async (message: Message) => {
+    if (!message.id || !message.audioData) return;
+
+    try {
+      if (playingMessageId === message.id) {
+        // ✅ FIX 8: Sound.stopPlayer
+        await Sound.stopPlayer();
+        Sound.removePlayBackListener();
+        setPlayingMessageId(null);
+        return;
+      }
+
+      if (playingMessageId) {
+        await Sound.stopPlayer();
+        Sound.removePlayBackListener();
+      }
+
+      const tempPath =
+        Platform.OS === 'android'
+          ? `${RNFS.CachesDirectoryPath}/play_${message.id}.mp4`
+          : `${RNFS.CachesDirectoryPath}/play_${message.id}.m4a`;
+
+      await RNFS.writeFile(tempPath, message.audioData, 'base64');
+      setPlayingMessageId(message.id);
+
+      // ✅ FIX 9: Sound.startPlayer
+      await Sound.startPlayer(tempPath);
+      Sound.addPlayBackListener(e => {
+        setPlaybackPosition(prev => ({
+          ...prev,
+          [message.id!]: e.currentPosition,
+        }));
+        if (e.currentPosition >= e.duration - 50) {
+          Sound.stopPlayer();
+          Sound.removePlayBackListener();
+          setPlayingMessageId(null);
+          setPlaybackPosition(prev => ({ ...prev, [message.id!]: 0 }));
+        }
+      });
+    } catch (error) {
+      console.error('Error playing audio:', error);
+      setPlayingMessageId(null);
+    }
+  };
+
+  // ─── Delete message ───────────────────────────────────────────────────────────
+  const handleDeleteMessage = (messageId: string) => {
+    Alert.alert(
+      'Delete Message',
+      'Are you sure you want to delete this message?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: () => deleteMessage(messageId),
+        },
+      ],
+    );
+    setSelectedMessageId(null);
+  };
+
+  const deleteMessage = async (messageId: string) => {
+    if (!user) return;
+    try {
+      const chatId = chatService.getChatId(user.uid, userData.uid);
+      await firestore()
+        .collection('chats')
+        .doc(chatId)
+        .collection('messages')
+        .doc(messageId)
+        .delete(); // ← permanently deletes the Firestore document
+    } catch (error) {
+      console.error('Error deleting message:', error);
+      Alert.alert('Error', 'Failed to delete message');
+    }
+  };
+  // ─── Call handlers ────────────────────────────────────────────────────────────
+  const handleVideoCall = async () => {
+    try {
       const callId = `call_${[user!.uid, userData.uid]
         .sort()
         .join('_')}_${Date.now()}`;
-
-      // Send notification to receiver
       await notificationService.sendCallNotification({
         receiverId: userData.uid,
         callerId: user!.uid,
         callerName: user?.displayName || user?.email || 'User',
         callerAvatar: userProfile?.profile_image,
-        callId: callId,
+        callId,
         callType: 'video',
       });
-
       navigation.navigate('videoCall', {
         userData: {
           uid: userData.uid,
@@ -149,54 +447,24 @@ const UserMessage = ({ route }: Props) => {
         },
         isIncomingCall: false,
       });
-      console.log('✅ Call notification sent successfully');
-      // Alert.alert(
-      //   'Calling...',
-      //   `Calling ${userData.name}. Please wait for them to answer.`,
-      //   [
-      //     {
-      //       text: 'Cancel',
-      //       style: 'cancel',
-      //       onPress: async () => {
-      //         console.log('User cancelled the call');
-      //         try {
-      //           // Cancel the call notification
-      //           await notificationService.cancelCallNotification(callId, userData.uid);
-      //           console.log('✅ Call cancelled successfully');
-      //         } catch (error) {
-      //           console.error('❌ Error cancelling call:', error);
-      //         }
-      //       }
-      //     }
-      //   ]
-      // );
     } catch (error) {
-      console.error('❌ Error initiating call:', error);
       Alert.alert('Error', 'Failed to initiate call. Please try again.');
     }
   };
 
   const handleVoiceCall = async () => {
-    console.log('=== INITIATING VOICE CALL ===');
-    console.log('Caller:', user?.uid);
-    console.log('Receiver:', userData.uid);
-
     try {
-      // Generate call ID
       const callId = `call_${[user!.uid, userData.uid]
         .sort()
         .join('_')}_${Date.now()}`;
-
-      // Send notification to receiver
       await notificationService.sendCallNotification({
         receiverId: userData.uid,
         callerId: user!.uid,
         callerName: user?.displayName || user?.email || 'User',
         callerAvatar: userProfile?.profile_image,
-        callId: callId,
+        callId,
         callType: 'audio',
       });
-
       navigation.navigate('voiceCall', {
         userData: {
           uid: userData.uid,
@@ -205,116 +473,65 @@ const UserMessage = ({ route }: Props) => {
         },
         isIncomingCall: false,
       });
-
-      console.log('✅ Voice call notification sent successfully');
-      // Alert.alert(
-      //   'Calling...',
-      //   `Calling ${userData.name}. Please wait for them to answer.`,
-      //   [
-      //     {
-      //       text: 'Cancel',
-      //       style: 'cancel',
-      //       onPress: async () => {
-      //         console.log('User cancelled the voice call');
-      //         try {
-      //           // Cancel the call notification
-      //           await notificationService.cancelCallNotification(callId, userData.uid);
-      //           console.log('✅ Voice call cancelled successfully');
-      //         } catch (error) {
-      //           console.error('❌ Error cancelling voice call:', error);
-      //         }
-      //       }
-      //     }
-      //   ]
-      // );
     } catch (error) {
-      console.error('❌ Error initiating voice call:', error);
       Alert.alert('Error', 'Failed to initiate voice call. Please try again.');
     }
   };
 
+  // ─── Send text message ────────────────────────────────────────────────────────
   const handleSendMessage = async () => {
     if (!inputText.trim() || !user) return;
-
     try {
       const messageText = inputText.trim();
       setInputText('');
       setIsFocused(false);
 
-      // Get the chat ID before sending the message
       const chatId = chatService.getChatId(user.uid, userData.uid);
-
-      // Remove current user from deleted_for_users array to "undelete" the conversation
       const chatDocRef = firestore().doc(`chats/${chatId}`);
       const chatDoc = await chatDocRef.get();
-
-      // Check if chatDoc is null (Firebase error)
-      if (!chatDoc) {
-        console.log('❌ Firestore document query returned null');
-        return;
-      }
-
+      if (!chatDoc) return;
       if (chatDoc.exists()) {
         const chatData = chatDoc.data();
         if (chatData?.deleted_for_users?.includes(user.uid)) {
-          // Remove current user from the deleted array
           await chatDocRef.update({
             deleted_for_users: firestore.FieldValue.arrayRemove(user.uid),
           });
         }
       }
 
-      // Send the message after potentially "undeleting" the conversation
       await chatService.sendMessage(user.uid, userData.uid, messageText);
-      setTimeout(() => {
-        flatListRef.current?.scrollToEnd({ animated: true });
-      }, 100);
+      setTimeout(
+        () => flatListRef.current?.scrollToEnd({ animated: true }),
+        100,
+      );
     } catch (error) {
       Alert.alert('Error', 'Failed to send message');
     }
   };
 
+  // ─── Send image ───────────────────────────────────────────────────────────────
   const handleSendImage = async (imageUri: string) => {
     if (!user || isSendingImage) return;
-
     try {
       setIsSendingImage(true);
-
-      // Get the chat ID before sending the message
       const chatId = chatService.getChatId(user.uid, userData.uid);
-
-      // Remove current user from deleted_for_users array to "undelete" the conversation
       const chatDocRef = firestore().doc(`chats/${chatId}`);
       const chatDoc = await chatDocRef.get();
-
-      // Check if chatDoc is null (Firebase error)
-      if (!chatDoc) {
-        console.log('❌ Firestore document query returned null');
-        return;
-      }
-
+      if (!chatDoc) return;
       if (chatDoc.exists()) {
         const chatData = chatDoc.data();
         if (chatData?.deleted_for_users?.includes(user.uid)) {
-          // Remove current user from the deleted array
           await chatDocRef.update({
             deleted_for_users: firestore.FieldValue.arrayRemove(user.uid),
           });
         }
       }
-
-      // Send the image message after potentially "undeleting" the conversation
-      await chatService.sendMessage(
-        user.uid,
-        userData.uid,
-        'Image', // Placeholder text
-        imageUri, // Pass the image URI for base64 conversion
+      await chatService.sendMessage(user.uid, userData.uid, 'Image', imageUri);
+      setTimeout(
+        () => flatListRef.current?.scrollToEnd({ animated: true }),
+        100,
       );
-      setTimeout(() => {
-        flatListRef.current?.scrollToEnd({ animated: true });
-      }, 100);
     } catch (error) {
-      console.error('Error sending image:', error);
       Alert.alert('Error', 'Failed to send image: ' + (error as Error).message);
     } finally {
       setIsSendingImage(false);
@@ -322,57 +539,45 @@ const UserMessage = ({ route }: Props) => {
   };
 
   const selectImageFromGallery = () => {
-    const options = {
-      mediaType: 'photo' as MediaType,
-      quality: 0.8 as const,
-      maxWidth: 1000,
-      maxHeight: 1000,
-    };
-
-    launchImageLibrary(options, response => {
-      if (response.didCancel || response.errorCode) {
-        console.log('Image picker cancelled or error:', response.errorMessage);
-        return;
-      }
-
-      const asset = response.assets?.[0];
-      if (asset && asset.uri) {
-        handleSendImage(asset.uri);
-      }
-    });
+    launchImageLibrary(
+      {
+        mediaType: 'photo' as MediaType,
+        quality: 0.8,
+        maxWidth: 1000,
+        maxHeight: 1000,
+      },
+      response => {
+        if (response.didCancel || response.errorCode) return;
+        const asset = response.assets?.[0];
+        if (asset?.uri) handleSendImage(asset.uri);
+      },
+    );
   };
 
   const captureImageFromCamera = async () => {
-    // Check if we have permission first
     if (Platform.OS === 'android' && !hasCameraPermission) {
-      const permissionResult = await requestCameraPermission();
-      if (!permissionResult) {
-        return;
-      }
+      const ok = await requestCameraPermission();
+      if (!ok) return;
     }
-
-    const options = {
-      mediaType: 'photo' as MediaType,
-      quality: 0.8 as const,
-      maxWidth: 1000,
-      maxHeight: 1000,
-    };
-
-    launchCamera(options, response => {
-      if (response.didCancel || response.errorCode) {
-        console.log('Camera cancelled or error:', response.errorMessage);
-        Alert.alert(
-          'Error',
-          response.errorMessage || 'Failed to capture image',
-        );
-        return;
-      }
-
-      const asset = response.assets?.[0];
-      if (asset && asset.uri) {
-        handleSendImage(asset.uri);
-      }
-    });
+    launchCamera(
+      {
+        mediaType: 'photo' as MediaType,
+        quality: 0.8,
+        maxWidth: 1000,
+        maxHeight: 1000,
+      },
+      response => {
+        if (response.didCancel || response.errorCode) {
+          Alert.alert(
+            'Error',
+            response.errorMessage || 'Failed to capture image',
+          );
+          return;
+        }
+        const asset = response.assets?.[0];
+        if (asset?.uri) handleSendImage(asset.uri);
+      },
+    );
   };
 
   const showImageOptions = () => {
@@ -380,47 +585,25 @@ const UserMessage = ({ route }: Props) => {
       Alert.alert('Please wait', 'Image is being uploaded...');
       return;
     }
-
     Alert.alert(
       'Send Image',
-      'Would you like to add an image?',
+      'Choose source',
       [
-        // {
-        //   text: 'Camera',
-        //   onPress: captureImageFromCamera,
-        // },
-        {
-          text: 'Gallery',
-          onPress: selectImageFromGallery,
-        },
-        {
-          text: 'Cancel',
-          style: 'cancel',
-        },
+        { text: 'Gallery', onPress: selectImageFromGallery },
+        { text: 'Cancel', style: 'cancel' },
       ],
       { cancelable: true },
     );
   };
 
+  // ─── Formatters ───────────────────────────────────────────────────────────────
   const formatTime = (timestamp: any) => {
     if (!timestamp) return '';
-
-    let date;
-
-    // Handle different timestamp formats
-    if (timestamp.toDate) {
-      // Firestore Timestamp
-      date = timestamp.toDate();
-    } else if (timestamp instanceof Date) {
-      // JavaScript Date object
-      date = timestamp;
-    } else if (timestamp._seconds) {
-      // Firestore timestamp object
-      date = new Date(timestamp._seconds * 1000);
-    } else {
-      return '';
-    }
-
+    let date: Date;
+    if (timestamp.toDate) date = timestamp.toDate();
+    else if (timestamp instanceof Date) date = timestamp;
+    else if (timestamp._seconds) date = new Date(timestamp._seconds * 1000);
+    else return '';
     return date.toLocaleTimeString([], {
       hour: '2-digit',
       minute: '2-digit',
@@ -430,169 +613,209 @@ const UserMessage = ({ route }: Props) => {
 
   const formatDate = (timestamp: any) => {
     if (!timestamp) return '';
-
-    let date;
-
-    // Handle different timestamp formats
-    if (timestamp.toDate) {
-      date = timestamp.toDate();
-    } else if (timestamp instanceof Date) {
-      date = timestamp;
-    } else if (timestamp._seconds) {
-      date = new Date(timestamp._seconds * 1000);
-    } else {
-      return '';
-    }
-
+    let date: Date;
+    if (timestamp.toDate) date = timestamp.toDate();
+    else if (timestamp instanceof Date) date = timestamp;
+    else if (timestamp._seconds) date = new Date(timestamp._seconds * 1000);
+    else return '';
     const today = new Date();
-    const messageDate = new Date(date);
-
-    if (messageDate.toDateString() === today.toDateString()) {
-      return 'Today';
-    } else {
-      return messageDate.toLocaleDateString([], {
-        month: 'short',
-        day: 'numeric',
-      });
-    }
+    if (date.toDateString() === today.toDateString()) return 'Today';
+    return date.toLocaleDateString([], { month: 'short', day: 'numeric' });
   };
 
-  // Mark messages as read when user opens the chat
-  useEffect(() => {
-    if (!user) return;
+  const formatRecordTime = (secs: number) => {
+    const m = Math.floor(secs / 60)
+      .toString()
+      .padStart(2, '0');
+    const s = (secs % 60).toString().padStart(2, '0');
+    return `${m}:${s}`;
+  };
 
-    const chatId = chatService.getChatId(user.uid, userData.uid);
+  const formatAudioDuration = (ms: number) => {
+    const totalSecs = Math.floor(ms / 1000);
+    const m = Math.floor(totalSecs / 60)
+      .toString()
+      .padStart(2, '0');
+    const s = (totalSecs % 60).toString().padStart(2, '0');
+    return `${m}:${s}`;
+  };
 
-    const markMessagesAsRead = async () => {
-      try {
-        console.log('Attempting to mark messages as read for chat:', chatId);
-        console.log('Current user ID:', user.uid);
-        console.log('Chat partner ID:', userData.uid);
-
-        const messagesRef = firestore()
-          .collection('chats')
-          .doc(chatId)
-          .collection('messages');
-
-        const q = query(
-          messagesRef,
-          where('receiverId', '==', user.uid), // Messages sent to current user
-          where('read', '==', false), // That are unread
-        );
-
-        const snapshot = await getDocs(q);
-
-        // Check if snapshot is null (Firebase error)
-        if (!snapshot) {
-          console.log('❌ Firestore query returned null');
-          return;
-        }
-
-        console.log(`Found ${snapshot.size} unread messages to mark as read`);
-
-        if (snapshot.empty) {
-          console.log('No unread messages found');
-          return;
-        }
-
-        const batch = firestore().batch();
-
-        snapshot.forEach((doc: any) => {
-          console.log('Marking message as read:', doc.id);
-          batch.update(doc.ref, { read: true });
-        });
-
-        await batch.commit();
-        console.log(`Successfully marked ${snapshot.size} messages as read`);
-      } catch (error) {
-        console.error('Error marking messages as read:', error);
-      }
-    };
-
-    // Mark messages as read when component mounts
-    markMessagesAsRead();
-  }, [user, userData.uid]);
-
+  // ─── Render message item ──────────────────────────────────────────────────────
   const renderItem = ({ item, index }: { item: Message; index: number }) => {
+    // ✅ FIX 10: deleted_for now in interface — no more TS error
+    if (item.deleted_for && user && item.deleted_for.includes(user.uid)) {
+      return null;
+    }
+
     const isCurrentUser = user && item.senderId === user.uid;
+    const isSelected = selectedMessageId === item.id;
     const showDateSeparator =
       index === 0 ||
       (index > 0 &&
         formatDate(messages[index - 1].timestamp) !==
           formatDate(item.timestamp));
 
-    // Check if message is an image (using type field and imageData)
     const isImageMessage = item.type === 'image' && item.imageData;
-    const messageText = isImageMessage ? item.imageData : item.text;
+    const isAudioMessage = item.type === 'audio' && item.audioData;
+    const isDeleted = item.deleted === true;
+
+    const isPlaying = playingMessageId === item.id;
+    const position = playbackPosition[item.id!] || 0;
+    const durationMs = (item.audioDuration || 0) * 1000;
+    const progress = durationMs > 0 ? Math.min(position / durationMs, 1) : 0;
 
     return (
-      <View>
-        {showDateSeparator && (
-          <View style={styles.dateSeparator}>
-            <Text style={styles.dateText}>{formatDate(item.timestamp)}</Text>
-          </View>
-        )}
-
-        <View
-          style={[
-            styles.messageRow,
-            isCurrentUser ? styles.rightAlign : styles.leftAlign,
-          ]}
-        >
-          {!isCurrentUser && (
-            <View style={styles.headerAvatarUser}>
-              <Text style={styles.headerAvatarTextUser}>
-                {userData.name[0]}
-              </Text>
+      <TouchableWithoutFeedback
+        onLongPress={() => {
+          if (!isDeleted) setSelectedMessageId(item.id || null);
+        }}
+        onPress={() => setSelectedMessageId(null)}
+      >
+        <View>
+          {showDateSeparator && (
+            <View style={styles.dateSeparator}>
+              <Text style={styles.dateText}>{formatDate(item.timestamp)}</Text>
             </View>
           )}
+
+          {/* Action bar shown on long press */}
+          {/* {isSelected && (
+  <View
+    style={[
+      styles.actionBar,
+      isCurrentUser ? styles.actionBarRight : styles.actionBarLeft,
+    ]}>
+    <TouchableOpacity
+      style={styles.actionBarBtn}
+      onPress={() => item.id && handleDeleteMessage(item.id)}>
+      <MaterialIcons name="delete" size={16} color="#ff4444" />
+      <Text style={styles.actionBarText}>Delete</Text>
+    </TouchableOpacity>
+  </View>
+)} */}
 
           <View
             style={[
-              styles.bubbleContainer,
-              isCurrentUser ? styles.rightContainer : styles.leftContainer,
+              styles.messageRow,
+              isCurrentUser ? styles.rightAlign : styles.leftAlign,
             ]}
           >
+            {!isCurrentUser && (
+              <View style={styles.headerAvatarUser}>
+                <Text style={styles.headerAvatarTextUser}>
+                  {userData.name[0]}
+                </Text>
+              </View>
+            )}
+
             <View
               style={[
-                styles.bubble,
-                isCurrentUser ? styles.rightBubble : styles.leftBubble,
+                styles.bubbleContainer,
+                isCurrentUser ? styles.rightContainer : styles.leftContainer,
               ]}
             >
-              {isImageMessage ? (
-                <Image
-                  source={{ uri: `data:image/jpeg;base64,${messageText}` }}
-                  style={styles.imageMessage}
-                  onError={error => console.log('Image load error:', error)}
-                  onLoad={success => console.log('Image loaded successfully')}
-                />
-              ) : (
-                <Text style={styles.messageText}>{item.text}</Text>
-              )}
-            </View>
-            {/* Timestamp for both sender and receiver messages */}
-            <Text
-              style={[
-                styles.timestamp,
-                isCurrentUser ? styles.rightTimestamp : styles.leftTimestamp,
-              ]}
-            >
-              {formatTime(item.timestamp)}
-            </Text>
-          </View>
+              <View
+                style={[
+                  styles.bubble,
+                  isCurrentUser ? styles.rightBubble : styles.leftBubble,
+                ]}
+              >
+                {isDeleted ? (
+                  <Text style={styles.deletedText}>
+                    🚫 This message was deleted
+                  </Text>
+                ) : isImageMessage ? (
+                  <Image
+                    source={{ uri: `data:image/jpeg;base64,${item.imageData}` }}
+                    style={styles.imageMessage}
+                  />
+                ) : isAudioMessage ? (
+                  /* ── Audio bubble ── */
+                  <TouchableOpacity
+                    style={styles.audioBubble}
+                    onPress={() => handlePlayAudio(item)}
+                  >
+                    <View
+                      style={[
+                        styles.audioPlayBtn,
+                        isCurrentUser
+                          ? styles.audioPlayBtnRight
+                          : styles.audioPlayBtnLeft,
+                      ]}
+                    >
+                      <MaterialIcons
+                        name={isPlaying ? 'pause' : 'play-arrow'}
+                        size={22}
+                        color="#fff"
+                      />
+                    </View>
+                    <View style={styles.audioInfo}>
+                      <View style={styles.progressBarBg}>
+                        <View
+                          style={[
+                            styles.progressBarFill,
+                            { width: `${progress * 100}%` },
+                          ]}
+                        />
+                      </View>
+                      <Text
+                        style={[
+                          styles.audioDuration,
+                          isCurrentUser
+                            ? styles.audioDurationRight
+                            : styles.audioDurationLeft,
+                        ]}
+                      >
+                        {isPlaying
+                          ? formatAudioDuration(position)
+                          : formatAudioDuration(
+                              (item.audioDuration || 0) * 1000,
+                            )}
+                      </Text>
+                    </View>
+                    <MaterialIcons
+                      name="keyboard-voice"
+                      size={16}
+                      color={isCurrentUser ? 'rgba(255,255,255,0.7)' : '#888'}
+                      style={{ marginLeft: 4 }}
+                    />
+                  </TouchableOpacity>
+                ) : (
+                  <Text
+                    style={[
+                      styles.messageText,
+                      isCurrentUser && { color: '#fff' },
+                    ]}
+                  >
+                    {item.text}
+                  </Text>
+                )}
+              </View>
 
-          {isCurrentUser && (
-            <View style={styles.headerAvatarUser}>
-              <Text style={styles.headerAvatarTextUser}>
-                {user?.displayName?.charAt(0)}
+              <Text
+                style={[
+                  styles.timestamp,
+                  isCurrentUser ? styles.rightTimestamp : styles.leftTimestamp,
+                ]}
+              >
+                {formatTime(item.timestamp)}
               </Text>
             </View>
-          )}
+
+            {isCurrentUser && (
+              <View style={styles.headerAvatarUser}>
+                <Text style={styles.headerAvatarTextUser}>
+                  {user?.displayName?.charAt(0)}
+                </Text>
+              </View>
+            )}
+          </View>
         </View>
-      </View>
+      </TouchableWithoutFeedback>
     );
   };
 
+  // ─── Render ───────────────────────────────────────────────────────────────────
   return (
     <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
       <KeyboardAvoidingView
@@ -616,12 +839,10 @@ const UserMessage = ({ route }: Props) => {
               style={{ width: '60%' }}
               onPress={() => navigation.navigate('userProfile', { userData })}
             >
-              <View>
-                <Text style={styles.headerName}>{userData.name}</Text>
-                <Text style={styles.headerStatus}>
-                  {userData.online ? 'Online' : 'Offline'}
-                </Text>
-              </View>
+              <Text style={styles.headerName}>{userData.name}</Text>
+              <Text style={styles.headerStatus}>
+                {userData.online ? 'Online' : 'Offline'}
+              </Text>
             </TouchableOpacity>
 
             <View
@@ -650,88 +871,128 @@ const UserMessage = ({ route }: Props) => {
           renderItem={renderItem}
           showsVerticalScrollIndicator={false}
           contentContainerStyle={styles.listContent}
+          onTouchStart={() => setSelectedMessageId(null)}
         />
 
         {/* INPUT BAR */}
         <View style={styles.inputWrapper}>
-          <TouchableOpacity
-            onPress={showImageOptions}
-            disabled={isSendingImage}
-          >
-            <Entypo
-              name="attachment"
-              size={24}
-              color={isSendingImage ? '#ccc' : '#000'}
-            />
-          </TouchableOpacity>
+          {isRecording ? (
+            /* ── Recording UI ── */
+            <View style={styles.recordingRow}>
+              <TouchableOpacity
+                onPress={cancelRecording}
+                style={styles.cancelRecordBtn}
+              >
+                <MaterialIcons name="delete" size={24} color="#ff4444" />
+              </TouchableOpacity>
 
-          <View style={{ width: '66%', top: 10, left: 3 }}>
-            <AppTextInput
-              style={{
-                backgroundColor: '#f0f0f0',
-                borderRadius: 14,
-                paddingRight: 40,
-              }}
-              value={inputText}
-              onChangeText={setInputText}
-              placeholder="Type a message..."
-              placeholderTextColor="#999"
-              multiline
-              onFocus={() => setIsFocused(true)}
-              onBlur={() => setIsFocused(false)}
-              label={null}
-              error={null}
-            />
-            <TouchableOpacity
-              style={{
-                position: 'absolute',
-                right: 10,
-                top: 10,
-                backgroundColor: '#f0f0f0',
-              }}
-            >
-              <Feather name="file" size={24} color="#666" />
-            </TouchableOpacity>
-          </View>
+              <View style={styles.recordingCenter}>
+                <Animated.View
+                  style={[styles.recordingDot, { opacity: pulseAnim }]}
+                />
+                <Text style={styles.recordingTime}>
+                  {formatRecordTime(recordSecs)}
+                </Text>
+                <Text style={styles.recordingHint}>Release ▲ to send</Text>
+              </View>
 
-          <TouchableOpacity
-            style={styles.actionButton}
-            onPress={captureImageFromCamera}
-            disabled={isSendingImage}
-          >
-            <Feather
-              name="camera"
-              size={24}
-              color={isSendingImage ? '#ccc' : '#666'}
-            />
-          </TouchableOpacity>
-
-          {inputText.trim() ? (
-            <TouchableOpacity
-              style={[
-                styles.sendButton,
-                !inputText.trim() && styles.disabledSendButton,
-              ]}
-              onPress={handleSendMessage}
-              disabled={!inputText.trim()}
-            >
-              <Feather
-                name="send"
-                size={22}
-                color={inputText.trim() ? '#fff' : '#aaa'}
-              />
-            </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.sendRecordBtn}
+                onPress={stopAndSendRecording}
+                disabled={isSendingAudio}
+              >
+                <Feather name="send" size={20} color="#fff" />
+              </TouchableOpacity>
+            </View>
           ) : (
-            <TouchableOpacity
-              style={styles.actionButton}
-              disabled={isSendingImage}
-            >
-              <MaterialIcons
-                name="keyboard-voice"
-                size={24}
-                color={isSendingImage ? '#ccc' : '#666'}
-              />
-            </TouchableOpacity>
+            /* ── Normal input UI ── */
+            <>
+              <TouchableOpacity
+                onPress={showImageOptions}
+                disabled={isSendingImage}
+              >
+                <Entypo
+                  name="attachment"
+                  size={24}
+                  color={isSendingImage ? '#ccc' : '#000'}
+                />
+              </TouchableOpacity>
+
+              <View style={{ width: '66%', top: 10, left: 3 }}>
+                <AppTextInput
+                  style={{
+                    backgroundColor: '#f0f0f0',
+                    borderRadius: 14,
+                    paddingRight: 40,
+                  }}
+                  value={inputText}
+                  onChangeText={setInputText}
+                  placeholder="Type a message..."
+                  placeholderTextColor="#999"
+                  multiline
+                  onFocus={() => setIsFocused(true)}
+                  onBlur={() => setIsFocused(false)}
+                  label={null}
+                  error={null}
+                />
+                <TouchableOpacity
+                  style={{
+                    position: 'absolute',
+                    right: 10,
+                    top: 10,
+                    backgroundColor: '#f0f0f0',
+                  }}
+                >
+                  <Feather name="file" size={24} color="#666" />
+                </TouchableOpacity>
+              </View>
+
+              <TouchableOpacity
+                style={styles.actionButton}
+                onPress={captureImageFromCamera}
+                disabled={isSendingImage}
+              >
+                <Feather
+                  name="camera"
+                  size={24}
+                  color={isSendingImage ? '#ccc' : '#666'}
+                />
+              </TouchableOpacity>
+
+              {inputText.trim() ? (
+                <TouchableOpacity
+                  style={[
+                    styles.sendButton,
+                    !inputText.trim() && styles.disabledSendButton,
+                  ]}
+                  onPress={handleSendMessage}
+                  disabled={!inputText.trim()}
+                >
+                  <Feather
+                    name="send"
+                    size={22}
+                    color={inputText.trim() ? '#fff' : '#aaa'}
+                  />
+                </TouchableOpacity>
+              ) : (
+                <TouchableOpacity
+                  style={styles.actionButton}
+                  disabled={isSendingImage || isSendingAudio}
+                  onLongPress={startRecording}
+                  onPressOut={() => {
+                    if (isLongPress.current) stopAndSendRecording();
+                  }}
+                  delayLongPress={250}
+                >
+                  <MaterialIcons
+                    name="keyboard-voice"
+                    size={28}
+                    color={isSendingAudio ? '#ccc' : '#18b3a4'}
+                    // color="#999"
+                  />
+                </TouchableOpacity>
+              )}
+            </>
           )}
         </View>
       </KeyboardAvoidingView>
@@ -743,12 +1004,9 @@ export default UserMessage;
 
 const styles = StyleSheet.create({
   actionButton: {},
-  container: {
-    flex: 1,
-    backgroundColor: '#fff',
-  },
+  container: { flex: 1, backgroundColor: '#fff' },
 
-  /* ---------------- Header ---------------- */
+  /* Header */
   header: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -782,35 +1040,14 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
   },
-  headerAvatarText: {
-    fontSize: 26,
-    color: '#fff',
-    textAlign: 'center',
-  },
-  headerAvatarTextUser: {
-    fontSize: 20,
-    color: '#fff',
-    textAlign: 'center',
-  },
-  headerName: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#000',
-  },
-  headerStatus: {
-    fontSize: 12,
-    color: '#4CAF50',
-    marginTop: 2,
-  },
+  headerAvatarText: { fontSize: 26, color: '#fff', textAlign: 'center' },
+  headerAvatarTextUser: { fontSize: 20, color: '#fff', textAlign: 'center' },
+  headerName: { fontSize: 16, fontWeight: '600', color: '#000' },
+  headerStatus: { fontSize: 12, color: '#4CAF50', marginTop: 2 },
 
-  /* ---------------- Messages ---------------- */
-  listContent: {
-    paddingBottom: 20,
-  },
-  dateSeparator: {
-    alignItems: 'center',
-    marginVertical: 15,
-  },
+  /* Messages */
+  listContent: { paddingBottom: 20 },
+  dateSeparator: { alignItems: 'center', marginVertical: 15 },
   dateText: {
     fontSize: 12,
     color: '#666',
@@ -824,36 +1061,11 @@ const styles = StyleSheet.create({
     marginVertical: 4,
     alignItems: 'flex-end',
   },
-  leftAlign: {
-    justifyContent: 'flex-start',
-    marginLeft: 10,
-  },
-  rightAlign: {
-    justifyContent: 'flex-end',
-  },
-  avatar: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    marginRight: 8,
-    marginBottom: 15,
-  },
-  currentUserAvatar: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    marginLeft: 8,
-    marginBottom: 15,
-  },
-  bubbleContainer: {
-    maxWidth: '75%',
-  },
-  leftContainer: {
-    alignItems: 'flex-start',
-  },
-  rightContainer: {
-    alignItems: 'flex-end',
-  },
+  leftAlign: { justifyContent: 'flex-start', marginLeft: 10 },
+  rightAlign: { justifyContent: 'flex-end' },
+  bubbleContainer: { maxWidth: '75%' },
+  leftContainer: { alignItems: 'flex-start' },
+  rightContainer: { alignItems: 'flex-end' },
   bubble: {
     paddingHorizontal: 16,
     paddingVertical: 10,
@@ -866,15 +1078,9 @@ const styles = StyleSheet.create({
     borderBottomLeftRadius: 4,
     elevation: 1,
   },
-  rightBubble: {
-    backgroundColor: '#18b3a4',
-    borderBottomRightRadius: 4,
-  },
-  messageText: {
-    fontSize: 16,
-    lineHeight: 20,
-    color: '#000',
-  },
+  rightBubble: { backgroundColor: '#18b3a4', borderBottomRightRadius: 4 },
+  messageText: { fontSize: 16, lineHeight: 20, color: '#000' },
+  deletedText: { fontSize: 14, color: '#999', fontStyle: 'italic' },
   leftTimestamp: {
     fontSize: 11,
     color: '#888',
@@ -887,18 +1093,64 @@ const styles = StyleSheet.create({
     marginTop: 4,
     alignSelf: 'flex-end',
   },
-  timestamp: {
-    fontSize: 11,
-    color: '#888',
-    marginTop: 4,
-  },
+  timestamp: { fontSize: 11, color: '#888', marginTop: 4 },
+  imageMessage: { width: 200, height: 200, borderRadius: 8 },
 
-  /* ---------------- Input Bar ---------------- */
+  /* Delete action bar */
+  actionBar: {
+    flexDirection: 'row',
+    paddingHorizontal: 16,
+    paddingVertical: 4,
+    backgroundColor: '#fff3f3',
+    borderRadius: 8,
+    marginHorizontal: 16,
+    marginBottom: 2,
+  },
+  actionBarLeft: { justifyContent: 'flex-start' },
+  actionBarRight: { justifyContent: 'flex-end' },
+  actionBarBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingVertical: 4,
+    paddingHorizontal: 8,
+  },
+  actionBarText: { color: '#ff4444', fontSize: 13, fontWeight: '600' },
+
+  /* Audio bubble */
+  audioBubble: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    minWidth: 180,
+    gap: 8,
+  },
+  audioPlayBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  audioPlayBtnRight: { backgroundColor: 'rgba(255,255,255,0.3)' },
+  audioPlayBtnLeft: { backgroundColor: '#18b3a4' },
+  audioInfo: { flex: 1, gap: 4 },
+  progressBarBg: {
+    height: 4,
+    backgroundColor: 'rgba(0,0,0,0.15)',
+    borderRadius: 2,
+    overflow: 'hidden',
+  },
+  progressBarFill: { height: '100%', backgroundColor: '#fff', borderRadius: 2 },
+  audioDuration: { fontSize: 11 },
+  audioDurationRight: { color: 'rgba(255,255,255,0.8)' },
+  audioDurationLeft: { color: '#666' },
+
+  /* Input bar */
   inputWrapper: {
     flexDirection: 'row',
     width: '100%',
     backgroundColor: '#fff',
-    height: 70,
+    minHeight: 70,
     justifyContent: 'space-between',
     alignItems: 'center',
     paddingHorizontal: 10,
@@ -906,27 +1158,6 @@ const styles = StyleSheet.create({
     borderColor: '#eee',
     marginBottom: 20,
   },
-
-  leftIcon: {
-    padding: 6,
-  },
-
-  rightIcon: {
-    padding: 6,
-  },
-
-  rightActions: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-
-  textInput: {
-    flex: 1,
-    fontSize: 15,
-    paddingVertical: 8,
-    color: '#000',
-  },
-
   sendButton: {
     width: 40,
     height: 40,
@@ -937,14 +1168,32 @@ const styles = StyleSheet.create({
     marginLeft: 6,
     marginBottom: 2,
   },
+  disabledSendButton: { backgroundColor: '#f0f0f0' },
 
-  disabledSendButton: {
-    backgroundColor: '#f0f0f0',
+  /* Recording UI */
+  recordingRow: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 4,
   },
-
-  imageMessage: {
-    width: 200,
-    height: 200,
-    borderRadius: 8,
+  cancelRecordBtn: { padding: 8 },
+  recordingCenter: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  recordingDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: '#ff4444',
+  },
+  recordingTime: { fontSize: 18, fontWeight: '700', color: '#333' },
+  recordingHint: { fontSize: 11, color: '#888' },
+  sendRecordBtn: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    backgroundColor: '#18b3a4',
+    justifyContent: 'center',
+    alignItems: 'center',
   },
 });

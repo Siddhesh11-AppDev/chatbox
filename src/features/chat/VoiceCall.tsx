@@ -8,6 +8,7 @@ import {
   PermissionsAndroid,
   Platform,
   StatusBar,
+  Linking,
 } from 'react-native';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { mediaDevices, MediaStream } from 'react-native-webrtc';
@@ -388,7 +389,7 @@ const VoiceCall = () => {
 
   const endCall = async () => {
     await doCleanup();
-    navigation.goBack();
+    navigation.navigate('userMsg', { userData });
   };
 
   // ── Controls ──────────────────────────────────────────────────────────────
@@ -410,12 +411,44 @@ const VoiceCall = () => {
   // ── Helpers ───────────────────────────────────────────────────────────────
   const requestPermissions = async () => {
     if (Platform.OS === 'android') {
-      const r = await PermissionsAndroid.requestMultiple([
-        PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
-      ]);
-      if (r['android.permission.RECORD_AUDIO'] !== 'granted')
+      const audioPermission = PermissionsAndroid.PERMISSIONS.RECORD_AUDIO;
+      
+      const permissionResult = await PermissionsAndroid.request(audioPermission);
+      const audioGranted = permissionResult === 'granted';
+      
+      if (!audioGranted) {
+        Alert.alert(
+          'Microphone Permission Required',
+          'The microphone permission is required for voice calls. Please enable it in Settings.',
+          [
+            {
+              text: 'Cancel',
+              style: 'cancel',
+              onPress: () => {
+                // Navigate back if permission is denied
+                navigation.goBack();
+              }
+            },
+            {
+              text: 'Settings',
+              onPress: async () => {
+                Linking.openSettings();
+                // Navigate back after opening settings
+                setTimeout(() => {
+                  navigation.goBack();
+                }, 1000);
+              }
+            }
+          ]
+        );
+        
+        // Throw error to stop the call initialization
         throw new Error('Microphone permission is required.');
+      }
     }
+    
+    // For iOS, we assume permissions are handled differently
+    return true;
   };
 
   const getLocalStream = async (): Promise<MediaStream> => {

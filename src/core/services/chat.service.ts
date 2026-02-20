@@ -2,7 +2,6 @@ import firestore, { serverTimestamp } from '@react-native-firebase/firestore';
 import { COLLECTIONS } from './collection';
 import { notificationService } from './notification.service';
 import RNFS from 'react-native-fs';
-import { Buffer } from 'buffer';
 
 interface Message {
   id?: string;
@@ -11,8 +10,12 @@ interface Message {
   text: string;
   timestamp: any;
   read: boolean;
-  type?: 'text' | 'image';
+  type?: 'text' | 'image' | 'audio';
   imageData?: string;
+  audioData?: string;
+  audioDuration?: number; 
+  deleted?: boolean;
+  deleted_for?: string[];
 }
 
 interface Chat {
@@ -33,19 +36,15 @@ class ChatService {
   async createChatIfNotExists(userId1: string, userId2: string) {
     const chatId = this.getChatId(userId1, userId2);
     const chatRef = this.firestore.collection(COLLECTIONS.CHATS).doc(chatId);
-
     const chatSnap = await chatRef.get();
     if (!chatSnap.exists) {
-      const chatData = {
+      await chatRef.set({
         participants: [userId1, userId2].sort(),
         createdAt: serverTimestamp(),
         lastMessage: '',
         lastMessageTime: serverTimestamp(),
-      };
-
-      await chatRef.set(chatData);
+      });
     }
-
     return chatId;
   }
 
@@ -57,17 +56,10 @@ class ChatService {
         await RNFS.copyFile(imageUri, tempPath);
         processedUri = tempPath;
       }
-      
       const base64Data = await RNFS.readFile(processedUri, 'base64');
-      
       if (processedUri.includes('/temp_image_')) {
-        try {
-          await RNFS.unlink(processedUri);
-        } catch (cleanupError) {
-          console.warn('Could not clean up temp file:', cleanupError);
-        }
+        RNFS.unlink(processedUri).catch(() => {});
       }
-      
       return base64Data;
     } catch (error) {
       console.error('Error converting image to base64:', error);
@@ -75,7 +67,20 @@ class ChatService {
     }
   }
 
-  async sendMessage(senderId: string, receiverId: string, text: string, imageUri?: string) {
+  /**
+   * Unified sendMessage that handles text, image, and audio.
+   *
+   * @param audioData  - base64-encoded audio string (for voice messages)
+   * @param audioDuration - duration in seconds
+   */
+  async sendMessage(
+    senderId: string,
+    receiverId: string,
+    text: string,
+    imageUri?: string,
+    audioData?: string,
+    audioDuration?: number,
+  ) {
     try {
       const chatId = this.getChatId(senderId, receiverId);
       await this.createChatIfNotExists(senderId, receiverId);
@@ -91,72 +96,63 @@ class ChatService {
         text,
         timestamp: serverTimestamp(),
         read: false,
+        deleted: false,
+        deleted_for: [],
       };
 
-      if (imageUri) {
+      let lastMessagePreview = text;
+
+      // ── Audio message ──────────────────────────────────────────────────────────
+      if (audioData) {
+        const audioSizeKB = Math.ceil(audioData.length / 1024);
+        if (audioSizeKB > 900) {
+          throw new Error(`Voice message too large (${audioSizeKB}KB). Maximum size is ~900KB.`);
+        }
+        messageData.type = 'audio';
+        messageData.audioData = audioData;
+        messageData.audioDuration = audioDuration ?? 0;
+        messageData.text = 'Voice Message';
+        lastMessagePreview = '🎤 Voice Message';
+
+      // ── Image message ──────────────────────────────────────────────────────────
+      } else if (imageUri) {
         const base64Data = await this.convertImageToBase64(imageUri);
-        
         const base64SizeKB = Math.ceil(base64Data.length / 1024);
         if (base64SizeKB > 900) {
-          throw new Error(`Image too large (${base64SizeKB}KB) to send. Maximum size is ~900KB.`);
+          throw new Error(`Image too large (${base64SizeKB}KB). Maximum size is ~900KB.`);
         }
-        
         messageData.type = 'image';
         messageData.imageData = base64Data;
         messageData.text = 'Image';
-        
-        const messageDoc = await messagesRef.add(messageData);
+        lastMessagePreview = '📷 Image';
 
-        await this.firestore
-          .collection(COLLECTIONS.CHATS)
-          .doc(chatId)
-          .set(
-            {
-              lastMessage: '📷 Image',
-              lastMessageTime: serverTimestamp(),
-            },
-            { merge: true },
-          );
+      // ── Text message ───────────────────────────────────────────────────────────
       } else {
         messageData.type = 'text';
-        
-        const messageDoc = await messagesRef.add(messageData);
-
-        await this.firestore
-          .collection(COLLECTIONS.CHATS)
-          .doc(chatId)
-          .set(
-            {
-              lastMessage: text,
-              lastMessageTime: serverTimestamp(),
-            },
-            { merge: true },
-          );
       }
 
-      const finalMessageDoc = await messagesRef.orderBy('timestamp', 'desc').limit(1).get();
-      const latestMessage = finalMessageDoc.docs[0];
-      
+      // Save to Firestore
+      await messagesRef.add(messageData);
+
+      // Update chat's lastMessage
+      await this.firestore
+        .collection(COLLECTIONS.CHATS)
+        .doc(chatId)
+        .set({ lastMessage: lastMessagePreview, lastMessageTime: serverTimestamp() }, { merge: true });
+
+      // Send push notification
       try {
         const senderDoc = await this.firestore.collection('users').doc(senderId).get();
         const senderName = senderDoc.exists() ? senderDoc.data()?.name || 'Someone' : 'Someone';
-        
+
         await notificationService.sendNotificationToUser(receiverId, {
           title: 'New Message',
-          body: `${senderName}: ${text.substring(0, 50)}${text.length > 50 ? '...' : ''}`,
-          data: {
-            type: 'chat',
-            senderId: senderId,
-            receiverId: receiverId,
-            chatId: chatId,
-            messageId: latestMessage.id,
-          }
+          body: `${senderName}: ${lastMessagePreview.substring(0, 50)}`,
+          data: { type: 'chat', senderId, receiverId, chatId },
         });
       } catch (notificationError) {
         console.error('Error sending notification:', notificationError);
       }
-
-      return latestMessage.id;
     } catch (error) {
       console.error('Error sending message:', error);
       throw error;
