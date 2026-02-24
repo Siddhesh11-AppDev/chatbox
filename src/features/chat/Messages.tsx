@@ -9,6 +9,11 @@ import {
   TouchableOpacity,
   View,
   Alert,
+  Modal,
+  TouchableWithoutFeedback,
+  Platform,
+  PermissionsAndroid,
+  Dimensions,
 } from 'react-native';
 import React, { useEffect, useRef, useState } from 'react';
 import firestore, {
@@ -40,6 +45,8 @@ import {
   StoryUser,
   Story,
 } from '../../core/services/stories.service';
+import { launchCamera, launchImageLibrary } from 'react-native-image-picker';
+import ImageResizer from 'react-native-image-resizer';
 
 type MessagesNavigationProp = NativeStackNavigationProp<
   AppStackParamList,
@@ -77,6 +84,16 @@ const Messages = () => {
     {},
   );
   const [refreshing, setRefreshing] = useState(false);
+  const [storySheetVisible, setStorySheetVisible] = useState(false);
+  const [isUploadingStory, setIsUploadingStory] = useState(false);
+  const sheetTranslateY = useRef(new Animated.Value(280)).current;
+  const sheetBackdropOpacity = useRef(new Animated.Value(0)).current;
+
+  // ── Full-screen story viewer modal ────────────────────────────────────────
+  const [storyViewerVisible, setStoryViewerVisible] = useState(false);
+  const [viewerStoryUsers, setViewerStoryUsers] = useState<StoryUser[]>([]);
+  const [viewerInitialIndex, setViewerInitialIndex] = useState(0);
+  const storyViewerSlide = useRef(new Animated.Value(Dimensions.get('window').height)).current;
 
   // Toggle search bar animation
   const toggleSearchBar = () => {
@@ -523,56 +540,169 @@ const Messages = () => {
     };
   }, [user]);
 
-  const handleAddStory = () => {
-    // Check if user already has stories
-    const hasExistingStories = myStories.length > 0;
-
-    if (hasExistingStories) {
-      // If user has existing stories, show them in story viewer
-      const myStoryUser: StoryUser = {
-        userId: user!.uid,
-        userName: userProfile?.name || 'You',
-        userAvatar: userProfile?.profile_image || '',
-        stories: myStories,
-        hasUnviewed: false, // For own stories, we don't track if they've been viewed
-      };
-
-      // Filter out the current user from storyUsers to avoid duplicates
-      const otherUsersStories = storyUsers.filter(
-        storyUser => storyUser.userId !== user!.uid,
-      );
-
-      navigation.navigate('StoryViewer' as any, {
-        storyUsers: [myStoryUser, ...otherUsersStories],
-        initialIndex: 0,
-      });
-    } else {
-      // If no existing stories, go to creator
-      navigation.navigate('StoryCreator' as any);
-    }
+  // ── Story picker bottom sheet ──────────────────────────────────────────────
+  const openStorySheet = () => {
+    setStorySheetVisible(true);
+    Animated.parallel([
+      Animated.spring(sheetTranslateY, {
+        toValue: 0,
+        damping: 20,
+        stiffness: 260,
+        mass: 0.9,
+        useNativeDriver: true,
+      }),
+      Animated.timing(sheetBackdropOpacity, {
+        toValue: 1,
+        duration: 280,
+        useNativeDriver: true,
+      }),
+    ]).start();
   };
 
-  const handleStoryPress = (stories: StoryUser[], index: number) => {
-    console.log('=== HANDLE STORY PRESS DEBUG ===');
-    console.log('Stories being passed:', stories);
-    console.log('Stories count:', stories.length);
-    if (stories.length > 0) {
-      console.log('First story user:', stories[0]);
-      console.log(
-        'First story user stories count:',
-        stories[0].stories?.length || 0,
-      );
-    }
-    console.log('Initial index:', index);
-    console.log('================================');
-
-    navigation.navigate('StoryViewer' as any, {
-      storyUsers: stories,
-      initialIndex: index,
+  const closeStorySheet = (callback?: () => void) => {
+    Animated.parallel([
+      Animated.timing(sheetTranslateY, {
+        toValue: 280,
+        duration: 250,
+        useNativeDriver: true,
+      }),
+      Animated.timing(sheetBackdropOpacity, {
+        toValue: 0,
+        duration: 250,
+        useNativeDriver: true,
+      }),
+    ]).start(() => {
+      setStorySheetVisible(false);
+      if (callback) callback();
     });
   };
 
-  // Function to manually refresh conversation list
+  const requestCameraPermission = async () => {
+    if (Platform.OS === 'android') {
+      try {
+        const granted = await PermissionsAndroid.request(
+          PermissionsAndroid.PERMISSIONS.CAMERA,
+          {
+            title: 'Camera Permission',
+            message: 'App needs camera permission to take photos',
+            buttonNeutral: 'Ask Me Later',
+            buttonNegative: 'Cancel',
+            buttonPositive: 'OK',
+          },
+        );
+        return granted === PermissionsAndroid.RESULTS.GRANTED;
+      } catch {
+        return false;
+      }
+    }
+    return true;
+  };
+
+  const compressStoryImage = async (uri: string): Promise<string> => {
+    try {
+      const result = await ImageResizer.createResizedImage(
+        uri, 1000, 1000, 'JPEG', 85, 0, undefined, true,
+      );
+      return result.uri;
+    } catch {
+      return uri;
+    }
+  };
+
+  const uploadStory = async (mediaUri: string, type: 'image' | 'video') => {
+    if (!userProfile) return;
+    setIsUploadingStory(true);
+    try {
+      const compressed = type === 'image' ? await compressStoryImage(mediaUri) : mediaUri;
+      await storiesService?.createStory(
+        userProfile.uid,
+        userProfile.name || 'User',
+        userProfile.profile_image || '',
+        compressed,
+        type,
+        '',
+      );
+      Alert.alert('Success', 'Story uploaded successfully!');
+    } catch (error: any) {
+      Alert.alert('Error', error?.message || 'Failed to upload story');
+    } finally {
+      setIsUploadingStory(false);
+    }
+  };
+
+  const handlePickFromGallery = () => {
+    closeStorySheet(() => {
+      launchImageLibrary(
+        { mediaType: 'photo', quality: 0.8, selectionLimit: 1 },
+        (response) => {
+          if (response.assets && response.assets[0]?.uri) {
+            uploadStory(response.assets[0].uri, 'image');
+          }
+        },
+      );
+    });
+  };
+
+  const handleTakePhoto = async () => {
+    const hasPermission = await requestCameraPermission();
+    if (!hasPermission) {
+      Alert.alert('Permission Denied', 'Camera permission is required');
+      return;
+    }
+    closeStorySheet(() => {
+      launchCamera(
+        { mediaType: 'photo', quality: 0.8, saveToPhotos: true, cameraType: 'back' },
+        (response) => {
+          if (response.assets && response.assets[0]?.uri) {
+            uploadStory(response.assets[0].uri, 'image');
+          }
+        },
+      );
+    });
+  };
+
+  const handleAddStory = () => {
+    openStorySheet();
+  };
+
+  const openStoryViewer = (stories: StoryUser[], initialIdx: number) => {
+    setViewerStoryUsers(stories);
+    setViewerInitialIndex(initialIdx);
+    storyViewerSlide.setValue(Dimensions.get('window').height);
+    setStoryViewerVisible(true);
+    Animated.spring(storyViewerSlide, {
+      toValue: 0,
+      damping: 24,
+      stiffness: 300,
+      mass: 0.9,
+      useNativeDriver: true,
+    }).start();
+  };
+
+  const closeStoryViewer = () => {
+    Animated.timing(storyViewerSlide, {
+      toValue: Dimensions.get('window').height,
+      duration: 280,
+      useNativeDriver: true,
+    }).start(() => setStoryViewerVisible(false));
+  };
+
+  const handleStoryPress = (stories: StoryUser[], index: number) => {
+    openStoryViewer(stories, index);
+  };
+
+  const handleViewMyStories = () => {
+    if (myStories.length === 0) return;
+    const myStoryUser: StoryUser = {
+      userId: user!.uid,
+      userName: userProfile?.name || 'You',
+      userAvatar: userProfile?.profile_image || '',
+      stories: myStories,
+      hasUnviewed: false,
+    };
+    const otherUsersStories = storyUsers.filter(s => s.userId !== user!.uid);
+    openStoryViewer([myStoryUser, ...otherUsersStories], 0);
+  };
   const refreshConversationList = async () => {
     if (user && users.length > 0) {
       await checkConversationUsers(users);
@@ -773,31 +903,42 @@ const Messages = () => {
               );
 
               return (
-                <TouchableOpacity
-                  style={styles.yourStoryContainer}
-                  onPress={handleAddStory}
-                >
-                  <View
-                    style={[
-                      styles.yourStoryRing,
-                      hasActiveStories && styles.activeYourStoryRing,
-                    ]}
+                <View style={styles.yourStoryContainer}>
+                  <TouchableOpacity
+                    onPress={hasActiveStories ? handleViewMyStories : handleAddStory}
+                    activeOpacity={0.8}
                   >
-                    <View style={styles.yourStoryAvatar}>
-                      {hasActiveStories ? (
-                        <Image
-                          source={{ uri: userProfile?.profile_image }}
-                          style={styles.storyImage}
-                        />
-                      ) : (
-                        <Feather name="plus" size={20} color="#FFF" />
-                      )}
+                    <View
+                      style={[
+                        styles.yourStoryRing,
+                        hasActiveStories && styles.activeYourStoryRing,
+                      ]}
+                    >
+                      <View style={styles.yourStoryAvatar}>
+                        {hasActiveStories ? (
+                          <Image
+                            source={{ uri: userProfile?.profile_image }}
+                            style={styles.storyImage}
+                          />
+                        ) : (
+                          <Feather name="plus" size={20} color="#FFF" />
+                        )}
+                      </View>
                     </View>
-                  </View>
+                  </TouchableOpacity>
+                  {/* {hasActiveStories && (
+                    <TouchableOpacity
+                      style={styles.addStoryBadge}
+                      onPress={handleAddStory}
+                      activeOpacity={0.8}
+                    >
+                      <Feather name="plus" size={12} color="#FFF" />
+                    </TouchableOpacity>
+                  )} */}
                   <Text style={styles.storyName} numberOfLines={1}>
                     {hasActiveStories ? 'Your Story' : 'Add Story'}
                   </Text>
-                </TouchableOpacity>
+                </View>
               );
             }
 
@@ -953,11 +1094,548 @@ const Messages = () => {
           </View>
         )}
       />
+
+      {/* ── Story Picker Bottom Sheet ── */}
+      <Modal
+        visible={storySheetVisible}
+        transparent
+        animationType="none"
+        statusBarTranslucent
+        onRequestClose={() => closeStorySheet()}
+      >
+        {/* Blurred backdrop — tapping dismisses */}
+        <TouchableWithoutFeedback onPress={() => closeStorySheet()}>
+          <Animated.View style={[storySheetStyles.backdrop, { opacity: sheetBackdropOpacity }]} />
+        </TouchableWithoutFeedback>
+
+        {/* Sheet */}
+        <Animated.View style={[storySheetStyles.sheet, { transform: [{ translateY: sheetTranslateY }] }]}>
+          {/* Drag handle */}
+          <View style={storySheetStyles.handle} />
+
+          {/* Title */}
+          <Text style={storySheetStyles.title}>Add to Story</Text>
+          <View style={storySheetStyles.divider} />
+
+          {/* Options row */}
+          <View style={storySheetStyles.optionsRow}>
+            {/* Camera */}
+            <TouchableOpacity
+              style={storySheetStyles.optionBtn}
+              onPress={handleTakePhoto}
+              activeOpacity={0.75}
+              disabled={isUploadingStory}
+            >
+              <View style={[storySheetStyles.iconCircle, { backgroundColor: '#E1306C' }]}>
+                <Feather name="camera" size={26} color="#FFF" />
+              </View>
+              <Text style={storySheetStyles.optionLabel}>Camera</Text>
+            </TouchableOpacity>
+
+            <View style={storySheetStyles.optionDivider} />
+
+            {/* Gallery */}
+            <TouchableOpacity
+              style={storySheetStyles.optionBtn}
+              onPress={handlePickFromGallery}
+              activeOpacity={0.75}
+              disabled={isUploadingStory}
+            >
+              <View style={[storySheetStyles.iconCircle, { backgroundColor: '#405DE6' }]}>
+                <Feather name="image" size={26} color="#FFF" />
+              </View>
+              <Text style={storySheetStyles.optionLabel}>Gallery</Text>
+            </TouchableOpacity>
+          </View>
+
+          {isUploadingStory && (
+            <Text style={storySheetStyles.uploadingText}>Uploading story...</Text>
+          )}
+
+          {/* Cancel */}
+          <TouchableOpacity
+            style={storySheetStyles.cancelBtn}
+            onPress={() => closeStorySheet()}
+            activeOpacity={0.7}
+          >
+            <Text style={storySheetStyles.cancelText}>Cancel</Text>
+          </TouchableOpacity>
+
+          <View style={{ height: Platform.OS === 'ios' ? 28 : 12 }} />
+        </Animated.View>
+      </Modal>
+
+      {/* ── Full-screen Story Viewer Modal ── */}
+      <Modal
+        visible={storyViewerVisible}
+        transparent
+        animationType="none"
+        statusBarTranslucent
+        onRequestClose={closeStoryViewer}
+      >
+        <Animated.View
+          style={[
+            storyViewerStyles.container,
+            { transform: [{ translateY: storyViewerSlide }] },
+          ]}
+        >
+          <StoryViewerContent
+            storyUsers={viewerStoryUsers}
+            initialIndex={viewerInitialIndex}
+            onClose={closeStoryViewer}
+            currentUserId={user?.uid || ''}
+            currentUserProfile={userProfile}
+            onAddStory={openStorySheet}
+          />
+        </Animated.View>
+      </Modal>
+
     </SafeAreaView>
   );
 };
 
 export default Messages;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// StoryViewerContent — self-contained inline story viewer
+// ─────────────────────────────────────────────────────────────────────────────
+interface StoryViewerContentProps {
+  storyUsers: StoryUser[];
+  initialIndex: number;
+  onClose: () => void;
+  currentUserId: string;
+  currentUserProfile: any;
+  onAddStory: () => void;
+}
+
+const StoryViewerContent = ({
+  storyUsers,
+  initialIndex,
+  onClose,
+  currentUserId,
+  currentUserProfile,
+  onAddStory,
+}: StoryViewerContentProps) => {
+  const { width: W, height: H } = Dimensions.get('window');
+
+  const validUsers = storyUsers.filter(
+    u => u && Array.isArray(u.stories) && u.stories.length > 0,
+  );
+
+  const [currentIndex, setCurrentIndex] = useState(
+    Math.min(initialIndex, validUsers.length - 1),
+  );
+  const [currentStoryIndex, setCurrentStoryIndex] = useState(0);
+  const [progress, setProgress] = useState(0);
+  const [localUsers, setLocalUsers] = useState<StoryUser[]>(validUsers);
+  const progressInterval = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Add-story sheet inside viewer
+  const [viewerSheetVisible, setViewerSheetVisible] = useState(false);
+  const [isUploading, setIsUploading] = useState(false);
+  const viewerSheetY = useRef(new Animated.Value(280)).current;
+  const viewerSheetBg = useRef(new Animated.Value(0)).current;
+
+  const currentUser = localUsers[currentIndex];
+  const currentStory = currentUser?.stories?.[currentStoryIndex];
+  const isMyStory = currentUser?.userId === currentUserId;
+
+  const clearTimer = () => {
+    if (progressInterval.current) clearInterval(progressInterval.current);
+  };
+
+  const startProgress = () => {
+    clearTimer();
+    setProgress(0);
+    progressInterval.current = setInterval(() => {
+      setProgress(prev => {
+        if (prev >= 100) {
+          goNext();
+          return 0;
+        }
+        return prev + 2;
+      });
+    }, 100);
+  };
+
+  const goNext = () => {
+    const user = localUsers[currentIndex];
+    if (!user) { onClose(); return; }
+    if (currentStoryIndex < user.stories.length - 1) {
+      setCurrentStoryIndex(p => p + 1);
+    } else if (currentIndex < localUsers.length - 1) {
+      setCurrentIndex(p => p + 1);
+      setCurrentStoryIndex(0);
+    } else {
+      onClose();
+    }
+  };
+
+  const goPrev = () => {
+    if (currentStoryIndex > 0) {
+      setCurrentStoryIndex(p => p - 1);
+    } else if (currentIndex > 0) {
+      const prevIdx = currentIndex - 1;
+      setCurrentIndex(prevIdx);
+      setCurrentStoryIndex(localUsers[prevIdx].stories.length - 1);
+    } else {
+      onClose();
+    }
+  };
+
+  useEffect(() => {
+    if (currentStory && storiesService) {
+      startProgress();
+      storiesService.markStoryAsViewed(currentStory.id, currentUserId);
+    }
+    return clearTimer;
+  }, [currentStory, currentIndex, currentStoryIndex]);
+
+  const handleDelete = async () => {
+    if (!currentStory || !storiesService) return;
+    Alert.alert('Delete Story', 'Delete this story?', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Delete', style: 'destructive',
+        onPress: async () => {
+          clearTimer();
+          try {
+            await storiesService!.deleteStory(currentStory.id);
+            const updated = [...localUsers];
+            const filtered = updated[currentIndex].stories.filter(s => s.id !== currentStory.id);
+            if (filtered.length > 0) {
+              updated[currentIndex] = { ...updated[currentIndex], stories: filtered };
+              setLocalUsers(updated);
+              setCurrentStoryIndex(p => Math.max(0, p));
+            } else {
+              const newUsers = updated.filter((_, i) => i !== currentIndex);
+              if (newUsers.length > 0) {
+                setLocalUsers(newUsers);
+                setCurrentIndex(Math.min(currentIndex, newUsers.length - 1));
+                setCurrentStoryIndex(0);
+              } else { onClose(); return; }
+            }
+          } catch { Alert.alert('Error', 'Failed to delete story'); }
+          setTimeout(startProgress, 100);
+        },
+      },
+    ]);
+  };
+
+  // Viewer-internal add story sheet
+  const openViewerSheet = () => {
+    clearTimer();
+    setViewerSheetVisible(true);
+    Animated.parallel([
+      Animated.spring(viewerSheetY, { toValue: 0, damping: 20, stiffness: 260, mass: 0.9, useNativeDriver: true }),
+      Animated.timing(viewerSheetBg, { toValue: 1, duration: 280, useNativeDriver: true }),
+    ]).start();
+  };
+
+  const closeViewerSheet = (cb?: () => void) => {
+    Animated.parallel([
+      Animated.timing(viewerSheetY, { toValue: 280, duration: 250, useNativeDriver: true }),
+      Animated.timing(viewerSheetBg, { toValue: 0, duration: 250, useNativeDriver: true }),
+    ]).start(() => {
+      setViewerSheetVisible(false);
+      if (cb) cb(); else startProgress();
+    });
+  };
+
+  const requestCam = async () => {
+    if (Platform.OS === 'android') {
+      const granted = await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.CAMERA);
+      return granted === PermissionsAndroid.RESULTS.GRANTED;
+    }
+    return true;
+  };
+
+  const doUpload = async (uri: string) => {
+    if (!currentUserProfile) return;
+    setIsUploading(true);
+    try {
+      let finalUri = uri;
+      try {
+        const r = await ImageResizer.createResizedImage(uri, 1000, 1000, 'JPEG', 85, 0, undefined, true);
+        finalUri = r.uri;
+      } catch {}
+      await storiesService?.createStory(
+        currentUserProfile.uid, currentUserProfile.name || 'User',
+        currentUserProfile.profile_image || '', finalUri, 'image', '',
+      );
+      Alert.alert('Success', 'Story uploaded!');
+    } catch (e: any) {
+      Alert.alert('Error', e?.message || 'Upload failed');
+    } finally {
+      setIsUploading(false);
+      startProgress();
+    }
+  };
+
+  const pickGallery = () => closeViewerSheet(() =>
+    launchImageLibrary({ mediaType: 'photo', quality: 0.8, selectionLimit: 1 }, r => {
+      if (r.assets?.[0]?.uri) doUpload(r.assets[0].uri!); else startProgress();
+    }),
+  );
+
+  const takePhoto = async () => {
+    const ok = await requestCam();
+    if (!ok) { Alert.alert('Permission Denied', 'Camera permission required'); return; }
+    closeViewerSheet(() =>
+      launchCamera({ mediaType: 'photo', quality: 0.8, saveToPhotos: true, cameraType: 'back' }, r => {
+        if (r.assets?.[0]?.uri) doUpload(r.assets[0].uri!); else startProgress();
+      }),
+    );
+  };
+
+  if (!localUsers.length || !currentUser || !currentStory) {
+    return (
+      <View style={storyViewerStyles.container}>
+        <StatusBar hidden />
+        <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+          <Text style={{ color: '#FFF', fontSize: 18 }}>No stories available</Text>
+          <TouchableOpacity onPress={onClose} style={{ marginTop: 20, padding: 12, backgroundColor: '#4CAF50', borderRadius: 8 }}>
+            <Text style={{ color: '#FFF' }}>Close</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    );
+  }
+
+  return (
+    <View style={storyViewerStyles.container}>
+      <StatusBar hidden />
+
+      {/* Progress bars */}
+      <View style={storyViewerStyles.progressContainer}>
+        {currentUser.stories.map((_, i) => (
+          <View key={i} style={storyViewerStyles.progressBar}>
+            <View
+              style={[
+                storyViewerStyles.progressFill,
+                {
+                  width: i < currentStoryIndex ? '100%'
+                    : i === currentStoryIndex ? `${progress}%`
+                    : '0%',
+                },
+              ]}
+            />
+          </View>
+        ))}
+      </View>
+
+      {/* Header */}
+      <View style={storyViewerStyles.header}>
+        <View style={storyViewerStyles.userInfo}>
+          <Image source={{ uri: currentUser.userAvatar }} style={storyViewerStyles.avatar} />
+          <Text style={storyViewerStyles.userName}>{currentUser.userName}</Text>
+        </View>
+        <View style={storyViewerStyles.headerActions}>
+          {isMyStory && (
+            <TouchableOpacity onPress={handleDelete} style={{ padding: 5 }}>
+              <Feather name="trash-2" size={20} color="#FFF" />
+            </TouchableOpacity>
+          )}
+          <TouchableOpacity onPress={onClose}>
+            <Feather name="x" size={26} color="#FFF" />
+          </TouchableOpacity>
+        </View>
+      </View>
+
+      {/* Story image */}
+      <View style={{ flex: 1 }}>
+        {currentStory.mediaData ? (
+          <Image
+            source={{ uri: `data:image/jpeg;base64,${currentStory.mediaData}` }}
+            style={{ width: W, flex: 1 }}
+            resizeMode="cover"
+          />
+        ) : (
+          <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+            <Text style={{ color: '#FFF' }}>Loading...</Text>
+          </View>
+        )}
+
+        {/* Tap zones */}
+        <TouchableOpacity
+          style={[storyViewerStyles.tapZone, { left: 0 }]}
+          onPress={goPrev}
+          onPressIn={clearTimer}
+          onPressOut={startProgress}
+          activeOpacity={1}
+        />
+        <TouchableOpacity
+          style={[storyViewerStyles.tapZone, { right: 0 }]}
+          onPress={goNext}
+          onPressIn={clearTimer}
+          onPressOut={startProgress}
+          activeOpacity={1}
+        />
+      </View>
+
+      {/* Caption */}
+      {currentStory.caption ? (
+        <View style={storyViewerStyles.captionBox}>
+          <Text style={storyViewerStyles.captionText}>{currentStory.caption}</Text>
+        </View>
+      ) : null}
+
+      {/* Views */}
+      {isMyStory && (
+        <View style={storyViewerStyles.viewsRow}>
+          <Feather name="eye" size={20} color="#FFF" />
+          <Text style={storyViewerStyles.viewsText}>{currentStory.viewers?.length ?? 0}</Text>
+        </View>
+      )}
+
+      {/* Add Story button */}
+      {isMyStory && (
+        <TouchableOpacity style={storyViewerStyles.addBtn} onPress={openViewerSheet}>
+          <Feather name="plus" size={20} color="#FFF" />
+          <Text style={storyViewerStyles.addBtnText}>Add Story</Text>
+        </TouchableOpacity>
+      )}
+
+      {/* Inner add-story sheet */}
+      {viewerSheetVisible && (
+        <>
+          <TouchableWithoutFeedback onPress={() => closeViewerSheet()}>
+            <Animated.View style={[storySheetStyles.backdrop, { opacity: viewerSheetBg }]} />
+          </TouchableWithoutFeedback>
+          <Animated.View style={[storySheetStyles.sheet, { transform: [{ translateY: viewerSheetY }] }]}>
+            <View style={storySheetStyles.handle} />
+            <Text style={storySheetStyles.title}>Add to Story</Text>
+            <View style={storySheetStyles.divider} />
+            <View style={storySheetStyles.optionsRow}>
+              <TouchableOpacity style={storySheetStyles.optionBtn} onPress={takePhoto} activeOpacity={0.75} disabled={isUploading}>
+                <View style={[storySheetStyles.iconCircle, { backgroundColor: '#E1306C' }]}>
+                  <Feather name="camera" size={26} color="#FFF" />
+                </View>
+                <Text style={storySheetStyles.optionLabel}>Camera</Text>
+              </TouchableOpacity>
+              <View style={storySheetStyles.optionDivider} />
+              <TouchableOpacity style={storySheetStyles.optionBtn} onPress={pickGallery} activeOpacity={0.75} disabled={isUploading}>
+                <View style={[storySheetStyles.iconCircle, { backgroundColor: '#405DE6' }]}>
+                  <Feather name="image" size={26} color="#FFF" />
+                </View>
+                <Text style={storySheetStyles.optionLabel}>Gallery</Text>
+              </TouchableOpacity>
+            </View>
+            {isUploading && <Text style={storySheetStyles.uploadingText}>Uploading...</Text>}
+            <TouchableOpacity style={storySheetStyles.cancelBtn} onPress={() => closeViewerSheet()}>
+              <Text style={storySheetStyles.cancelText}>Cancel</Text>
+            </TouchableOpacity>
+            <View style={{ height: Platform.OS === 'ios' ? 28 : 12 }} />
+          </Animated.View>
+        </>
+      )}
+    </View>
+  );
+};
+
+const storyViewerStyles = StyleSheet.create({
+  container: {
+    flex: 1,
+    backgroundColor: '#000',
+  },
+  progressContainer: {
+    flexDirection: 'row',
+    paddingHorizontal: 10,
+    paddingTop: Platform.OS === 'ios' ? 54 : 36,
+    gap: 4,
+  },
+  progressBar: {
+    flex: 1,
+    height: 2.5,
+    backgroundColor: 'rgba(255,255,255,0.35)',
+    borderRadius: 2,
+  },
+  progressFill: {
+    height: '100%',
+    backgroundColor: '#FFF',
+    borderRadius: 2,
+  },
+  header: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+  },
+  userInfo: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  avatar: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    borderWidth: 1.5,
+    borderColor: '#FFF',
+  },
+  userName: {
+    color: '#FFF',
+    fontWeight: '600',
+    fontSize: 15,
+  },
+  headerActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 16,
+  },
+  tapZone: {
+    position: 'absolute',
+    top: 0,
+    bottom: 0,
+    width: '50%',
+  },
+  captionBox: {
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    backgroundColor: 'rgba(0,0,0,0.4)',
+  },
+  captionText: {
+    color: '#FFF',
+    fontSize: 15,
+  },
+  viewsRow: {
+    position: 'absolute',
+    bottom: 80,
+    alignSelf: 'center',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: 'rgba(0,0,0,0.4)',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 20,
+  },
+  viewsText: {
+    color: '#FFF',
+    fontSize: 15,
+    fontWeight: '500',
+  },
+  addBtn: {
+    position: 'absolute',
+    bottom: 30,
+    right: 20,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    borderRadius: 25,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.3)',
+  },
+  addBtnText: {
+    color: '#FFF',
+    fontWeight: '600',
+    fontSize: 14,
+  },
+});
 
 const styles = StyleSheet.create({
   animatedSearchContainer: {
@@ -1171,6 +1849,20 @@ const styles = StyleSheet.create({
   yourStoryContainer: {
     alignItems: 'center',
     marginHorizontal: 8,
+    position: 'relative',
+  },
+  addStoryBadge: {
+    position: 'absolute',
+    bottom: 30,
+    right: 24,
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+   
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 2,
+    borderColor: '#FFF',
   },
   yourStoryRing: {
     borderWidth: 3,
@@ -1209,5 +1901,111 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '600',
     marginLeft: 5,
+  },
+  // addStoryBadge: {
+  //   position: 'absolute',
+  //   bottom: 20,
+  //   right: 2,
+  //   width: 22,
+  //   height: 22,
+  //   borderRadius: 11,
+  //   backgroundColor: '#E1306C',
+  //   justifyContent: 'center',
+  //   alignItems: 'center',
+  //   borderWidth: 2,
+  //   borderColor: '#FFF',
+  // },
+});
+
+// Story picker bottom sheet styles (separate StyleSheet for clarity)
+const storySheetStyles = StyleSheet.create({
+  backdrop: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.65)',
+  },
+  sheet: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    backgroundColor: '#1C1C1E',
+    borderTopLeftRadius: 22,
+    borderTopRightRadius: 22,
+    paddingTop: 10,
+    paddingHorizontal: 20,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: -6 },
+    shadowOpacity: 0.3,
+    shadowRadius: 20,
+    elevation: 30,
+  },
+  handle: {
+    width: 36,
+    height: 4,
+    backgroundColor: '#48484A',
+    borderRadius: 2,
+    alignSelf: 'center',
+    marginBottom: 18,
+  },
+  title: {
+    fontSize: 17,
+    fontWeight: '600',
+    color: '#FFF',
+    textAlign: 'center',
+    marginBottom: 18,
+    letterSpacing: -0.2,
+  },
+  divider: {
+    height: StyleSheet.hairlineWidth,
+    backgroundColor: '#38383A',
+    marginHorizontal: -20,
+    marginBottom: 28,
+  },
+  optionsRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-evenly',
+    alignItems: 'center',
+    marginBottom: 28,
+  },
+  optionBtn: {
+    flex: 1,
+    alignItems: 'center',
+    gap: 12,
+  },
+  optionDivider: {
+    width: StyleSheet.hairlineWidth,
+    height: 70,
+    backgroundColor: '#38383A',
+  },
+  iconCircle: {
+    width: 68,
+    height: 68,
+    borderRadius: 34,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  optionLabel: {
+    fontSize: 14,
+    fontWeight: '500',
+    color: '#EBEBF5',
+    letterSpacing: 0.1,
+  },
+  uploadingText: {
+    color: '#8E8E93',
+    textAlign: 'center',
+    fontSize: 13,
+    marginBottom: 12,
+  },
+  cancelBtn: {
+    paddingVertical: 16,
+    alignItems: 'center',
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: '#38383A',
+    marginHorizontal: -20,
+  },
+  cancelText: {
+    fontSize: 16,
+    fontWeight: '500',
+    color: '#8E8E93',
   },
 });

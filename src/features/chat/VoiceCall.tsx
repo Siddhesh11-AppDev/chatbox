@@ -8,12 +8,17 @@ import {
   PermissionsAndroid,
   Platform,
   StatusBar,
+  Animated,
+  AppState,
   Linking,
 } from 'react-native';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { mediaDevices, MediaStream } from 'react-native-webrtc';
 import Feather from 'react-native-vector-icons/Feather';
-import { FirebaseWebRTCService } from '../../core/services/FirebaseWebRTCService';
+import {
+  FirebaseWebRTCService,
+  NetworkStats,
+} from '../../core/services/FirebaseWebRTCService';
 import { useAuth } from '../../core/context/AuthContext';
 import firestore from '@react-native-firebase/firestore';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -45,6 +50,13 @@ const STATUS_LABEL: Record<string, string> = {
   closed: 'Call ended',
 };
 
+const QUALITY_BARS: Record<string, number> = { good: 3, fair: 2, poor: 1 };
+const QUALITY_COLORS: Record<string, string> = {
+  good: '#43d16e',
+  fair: '#f5a623',
+  poor: '#e53935',
+};
+
 const VoiceCall = () => {
   const navigation = useNavigation<any>();
   const route = useRoute();
@@ -65,6 +77,11 @@ const VoiceCall = () => {
     useState<ConnectionState>('initializing');
   const [callDuration, setCallDuration] = useState(0);
   const [callStatus, setCallStatus] = useState('initializing');
+  // ── NEW: network quality + speaking indicator ─────────────────────────────
+  const [networkQuality, setNetworkQuality] = useState<
+    'good' | 'fair' | 'poor' | null
+  >(null);
+  const [remoteSpeaking, setRemoteSpeaking] = useState(false);
 
   const webRTCServiceRef = useRef<FirebaseWebRTCService | null>(null);
   const callIdRef = useRef('');
@@ -76,49 +93,118 @@ const VoiceCall = () => {
   const cleanedRef = useRef(false);
   const pendingOfferRef = useRef<any>(null);
   const readyToAnswerRef = useRef(false);
+  // ── FIX: Use mountedRef instead of closure `cancelled` variable ───────────
+  // The `cancelled` closure pattern breaks when doCleanup() is called from
+  // outside the init closure. mountedRef is always reachable via the ref.
+  const mountedRef = useRef(true);
+  // ── NEW: speaking detection + pulse animation ─────────────────────────────
+  const speakingTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const speakingPulse = useRef(new Animated.Value(1)).current;
+  const connectionStateRef = useRef<ConnectionState>('initializing');
 
-  // ── INIT ─────────────────────────────────────────────────────────────────
+  // ── NEW: Speaking pulse animation ─────────────────────────────────────────
   useEffect(() => {
-    let cancelled = false;
+    connectionStateRef.current = connectionState;
+  }, [connectionState]);
+
+  useEffect(() => {
+    if (remoteSpeaking) {
+      Animated.loop(
+        Animated.sequence([
+          Animated.timing(speakingPulse, {
+            toValue: 1.12,
+            duration: 350,
+            useNativeDriver: true,
+          }),
+          Animated.timing(speakingPulse, {
+            toValue: 1,
+            duration: 350,
+            useNativeDriver: true,
+          }),
+        ]),
+      ).start();
+    } else {
+      speakingPulse.stopAnimation();
+      Animated.spring(speakingPulse, {
+        toValue: 1,
+        useNativeDriver: true,
+      }).start();
+    }
+  }, [remoteSpeaking]);
+
+  // ── NEW: AppState — keep audio session alive in background ────────────────
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', nextState => {
+      if (!mountedRef.current) return;
+      if (nextState === 'active' && InCallManager) {
+        // Re-apply audio routing when app comes back to foreground
+        InCallManager.setForceSpeakerphoneOn(isSpeaker);
+      }
+    });
+    return () => sub.remove();
+  }, [isSpeaker]);
+
+  // ── INIT ──────────────────────────────────────────────────────────────────
+  useEffect(() => {
+    mountedRef.current = true;
+    cleanedRef.current = false;
+
+    // ── FIX: Start InCallManager audio session IMMEDIATELY on mount ──────────
+    // iOS requires the audio session to be configured before any stream or
+    // peer connection work. Starting it here (not after stream setup) ensures
+    // correct routing from the first media packet.
+    if (InCallManager) {
+      InCallManager.start({ media: 'audio' });
+      InCallManager.setForceSpeakerphoneOn(false); // earpiece default for voice
+    }
 
     const init = async () => {
       try {
         await requestPermissions();
 
-        // ── Determine callId ──────────────────────────────────────────────
-        // Callee always receives the callId from IncomingCallScreen params.
-        // Caller generates a new Firestore doc ID (no timestamp, no race).
         const callId =
           isIncomingCall && incomingCallId
             ? incomingCallId
             : firestore().collection('calls').doc().id;
         callIdRef.current = callId;
 
-        // Caller = not an incoming call. Simple, deterministic.
         const isCaller = !isIncomingCall;
         isCallerRef.current = isCaller;
-
         console.log(`[VoiceCall] init — isCaller:${isCaller} callId:${callId}`);
 
-        // ── Build WebRTC service ──────────────────────────────────────────
         const service = new FirebaseWebRTCService(
           callId,
           user!.uid,
+          // onRemoteStream — audio only, no RTCView needed
           (_stream: MediaStream) => {
-            // Audio-only: remote stream exists but no video view needed
             console.log('[VoiceCall] Remote stream received');
+            // ── NEW: start speaking detection ─────────────────────────────
+            startSpeakingDetection();
           },
+          // onConnectionStateChange
           (state: string) => {
-            if (cancelled) return;
+            if (!mountedRef.current) return;
             console.log('[VoiceCall] Connection state →', state);
             setConnectionState(state as ConnectionState);
-            if (state === 'connected') setCallStatus('connected');
+            if (state === 'connected') {
+              setCallStatus('connected');
+              if (InCallManager)
+                InCallManager.setForceSpeakerphoneOn(isSpeaker);
+            }
             if (state === 'closed') doCleanup().then(() => navigation.goBack());
           },
+          // onError
           (err: string) => {
-            if (!cancelled) handleError(err);
+            if (!mountedRef.current) return;
+            handleError(err);
           },
+          // onOfferReceived (callee only)
           isCaller ? undefined : handleOfferReceived,
+          // ── NEW: onNetworkStats ──────────────────────────────────────────
+          (stats: NetworkStats) => {
+            if (!mountedRef.current) return;
+            setNetworkQuality(stats.quality);
+          },
         );
         webRTCServiceRef.current = service;
 
@@ -126,11 +212,6 @@ const VoiceCall = () => {
         if (isCaller) {
           setCallStatus('calling');
 
-          // Step 1: Send call notification to callee.
-          //         This writes the call doc (status:'ringing') AND signals
-          //         the callee's user doc (incomingCall field).
-          //         We do this BEFORE initialize() so the call doc exists
-          //         when initialize() merges the participant data into it.
           const callerName =
             userProfile?.name || user?.displayName || user?.email || 'User';
           await notificationService.sendCallNotification({
@@ -143,34 +224,25 @@ const VoiceCall = () => {
           });
           console.log('[VoiceCall] Call notification sent');
 
-          if (cancelled) return;
+          if (!mountedRef.current) return;
 
-          // Step 2: initialize() — builds PC, Firestore listeners, writes
-          //         caller participant data into the EXISTING call doc.
-          //         Because sendCallNotification already created the doc,
-          //         this merge is guaranteed to preserve all fields.
           await service.initialize(true);
           console.log('[VoiceCall] Caller initialized');
 
-          if (cancelled) return;
+          if (!mountedRef.current) return;
 
-          // Step 3: Get microphone
+          // ── FIX: Get local stream with proper audio constraints ────────────
           const stream = await getLocalStream();
-          if (cancelled) {
+          if (!mountedRef.current) {
             stream.getTracks().forEach(t => t.stop());
             return;
           }
           localStreamRef.current = stream;
           await service.addLocalStream(stream);
 
-          if (InCallManager) {
-            InCallManager.start({ media: 'audio' });
-            InCallManager.setForceSpeakerphoneOn(isSpeaker);
-          }
-
-          // Step 4: 60-second no-answer timeout
+          // 60-second no-answer timeout
           callTimeoutRef.current = setTimeout(() => {
-            if (cancelled) return;
+            if (!mountedRef.current) return;
             Alert.alert('No Answer', 'The call was not answered.', [
               {
                 text: 'OK',
@@ -182,24 +254,20 @@ const VoiceCall = () => {
             ]);
           }, 60000);
 
-          // Step 5: Watch for callee accepting (status='answered')
-          //         ONLY then create the WebRTC offer.
-          //         This is the gate that synchronises both peers.
+          // Wait for callee to accept (status='answered'), then create offer
           acceptListenerRef.current = firestore()
             .collection('calls')
             .doc(callId)
             .onSnapshot(doc => {
-              if (cancelled) return;
+              if (!mountedRef.current) return;
               const status = doc.data()?.status;
               console.log('[VoiceCall] Call doc status →', status);
 
               if (status === 'answered') {
-                // Stop the no-answer timer
                 if (callTimeoutRef.current) {
                   clearTimeout(callTimeoutRef.current);
                   callTimeoutRef.current = null;
                 }
-                // Unsubscribe this listener — we only need the trigger once
                 const unsub = acceptListenerRef.current;
                 acceptListenerRef.current = null;
                 unsub?.();
@@ -207,13 +275,11 @@ const VoiceCall = () => {
                 setConnectionState('connecting');
                 setCallStatus('connecting');
 
-                // NOW create offer — callee is ready and waiting
                 console.log('[VoiceCall] Callee answered — creating offer');
                 service.createOffer(true).catch(err => {
-                  if (!cancelled) {
-                    console.error('[VoiceCall] createOffer failed:', err);
-                    handleError('Failed to start call: ' + err.message);
-                  }
+                  if (!mountedRef.current) return;
+                  console.error('[VoiceCall] createOffer failed:', err);
+                  handleError('Failed to start call: ' + err.message);
                 });
               } else if (status === 'ended') {
                 if (callTimeoutRef.current) {
@@ -223,7 +289,8 @@ const VoiceCall = () => {
                 const unsub = acceptListenerRef.current;
                 acceptListenerRef.current = null;
                 unsub?.();
-                if (!cancelled) doCleanup().then(() => navigation.goBack());
+                if (mountedRef.current)
+                  doCleanup().then(() => navigation.goBack());
               }
             });
 
@@ -231,24 +298,19 @@ const VoiceCall = () => {
         } else {
           setCallStatus('receiving');
 
-          // Step 1: initialize() — callee only writes participant metadata,
-          //         never touches status (it's already 'answered').
           await service.initialize(false);
           console.log('[VoiceCall] Callee initialized');
 
-          if (cancelled) return;
+          if (!mountedRef.current) return;
 
-          // Step 2: Get microphone
           const stream = await getLocalStream();
-          if (cancelled) {
+          if (!mountedRef.current) {
             stream.getTracks().forEach(t => t.stop());
             return;
           }
           localStreamRef.current = stream;
           await service.addLocalStream(stream);
 
-          // Step 3: Mark ready — process any offer that arrived while we were
-          //         getting the microphone (race condition safety net)
           readyToAnswerRef.current = true;
           console.log(
             '[VoiceCall] Callee ready. Pending offer:',
@@ -259,22 +321,18 @@ const VoiceCall = () => {
             pendingOfferRef.current = null;
           }
 
-          if (InCallManager) {
-            InCallManager.start({ media: 'audio' });
-            InCallManager.setForceSpeakerphoneOn(isSpeaker);
-          }
-
-          // Watch for caller cancelling before offer arrives
+          // Watch for caller cancelling
           const unsubCancel = notificationService.listenForCallCancellation(
             callId,
             () => {
-              if (!cancelled) doCleanup().then(() => navigation.goBack());
+              if (mountedRef.current)
+                doCleanup().then(() => navigation.goBack());
             },
           );
           (callIdRef as any).cancelUnsub = unsubCancel;
         }
       } catch (err: any) {
-        if (!cancelled) {
+        if (mountedRef.current) {
           console.error('[VoiceCall] Init error:', err);
           Alert.alert('Error', 'Could not start call: ' + err.message);
           navigation.goBack();
@@ -284,12 +342,12 @@ const VoiceCall = () => {
 
     init();
     return () => {
-      cancelled = true;
+      mountedRef.current = false;
       doCleanup();
     };
   }, []);
 
-  // ── Duration timer ────────────────────────────────────────────────────────
+  // ── Duration timer ─────────────────────────────────────────────────────────
   useEffect(() => {
     if (connectionState === 'connected') {
       callTimerRef.current = setInterval(
@@ -308,7 +366,19 @@ const VoiceCall = () => {
     };
   }, [connectionState]);
 
-  // ── Offer handler (callee only) ───────────────────────────────────────────
+  // ── NEW: Speaking detection via network stats proxy ───────────────────────
+  const startSpeakingDetection = () => {
+    speakingTimerRef.current = setInterval(async () => {
+      if (!mountedRef.current || !webRTCServiceRef.current) return;
+      try {
+        const stats = await webRTCServiceRef.current.getNetworkStats();
+        if (!stats) return;
+        setRemoteSpeaking(stats.jitter > 0.005);
+      } catch (_) {}
+    }, 600);
+  };
+
+  // ── Offer handler (callee only) ────────────────────────────────────────────
   const handleOfferReceived = async (offerData: any) => {
     console.log(
       '[VoiceCall] Offer arrived. ready:',
@@ -317,11 +387,13 @@ const VoiceCall = () => {
       !!offerData?.offer,
     );
     if (!readyToAnswerRef.current) {
-      pendingOfferRef.current = offerData.offer;
+      pendingOfferRef.current = offerData.offer ?? offerData;
       return;
     }
     try {
-      await webRTCServiceRef.current?.handleRemoteOffer(offerData.offer);
+      await webRTCServiceRef.current?.handleRemoteOffer(
+        offerData.offer ?? offerData,
+      );
     } catch (err) {
       handleError('Failed to connect to call');
     }
@@ -338,7 +410,7 @@ const VoiceCall = () => {
     }
   };
 
-  // ── Cleanup ───────────────────────────────────────────────────────────────
+  // ── Cleanup ────────────────────────────────────────────────────────────────
   const doCleanup = async () => {
     if (cleanedRef.current) return;
     cleanedRef.current = true;
@@ -354,6 +426,10 @@ const VoiceCall = () => {
     if (acceptListenerRef.current) {
       acceptListenerRef.current();
       acceptListenerRef.current = null;
+    }
+    if (speakingTimerRef.current) {
+      clearInterval(speakingTimerRef.current);
+      speakingTimerRef.current = null;
     }
 
     const cancelUnsub = (callIdRef as any).cancelUnsub;
@@ -374,14 +450,13 @@ const VoiceCall = () => {
     }
 
     try {
-      if (!isCallerRef.current && user) {
+      if (!isCallerRef.current && user)
         await notificationService.clearIncomingCall(user.uid);
-      } else if (isCallerRef.current && userData?.uid) {
+      else if (isCallerRef.current && userData?.uid)
         await notificationService.cancelCallNotification(
           callIdRef.current,
           userData.uid,
         );
-      }
     } catch (_) {}
 
     notificationService.resetCallState();
@@ -392,7 +467,7 @@ const VoiceCall = () => {
     navigation.navigate('userMsg', { userData });
   };
 
-  // ── Controls ──────────────────────────────────────────────────────────────
+  // ── Controls ───────────────────────────────────────────────────────────────
   const toggleMute = () => {
     localStreamRef.current?.getAudioTracks().forEach(t => {
       t.enabled = !t.enabled;
@@ -408,51 +483,51 @@ const VoiceCall = () => {
     }
   };
 
-  // ── Helpers ───────────────────────────────────────────────────────────────
+  // ── Helpers ────────────────────────────────────────────────────────────────
   const requestPermissions = async () => {
     if (Platform.OS === 'android') {
       const audioPermission = PermissionsAndroid.PERMISSIONS.RECORD_AUDIO;
-      
-      const permissionResult = await PermissionsAndroid.request(audioPermission);
-      const audioGranted = permissionResult === 'granted';
-      
-      if (!audioGranted) {
+      const result = await PermissionsAndroid.request(audioPermission);
+      if (result !== 'granted') {
         Alert.alert(
           'Microphone Permission Required',
-          'The microphone permission is required for voice calls. Please enable it in Settings.',
+          'The microphone permission is required for voice calls.',
           [
             {
               text: 'Cancel',
               style: 'cancel',
-              onPress: () => {
-                // Navigate back if permission is denied
-                navigation.goBack();
-              }
+              onPress: () => navigation.goBack(),
             },
             {
               text: 'Settings',
-              onPress: async () => {
+              onPress: () => {
                 Linking.openSettings();
-                // Navigate back after opening settings
-                setTimeout(() => {
-                  navigation.goBack();
-                }, 1000);
-              }
-            }
-          ]
+                setTimeout(() => navigation.goBack(), 1000);
+              },
+            },
+          ],
         );
-        
-        // Throw error to stop the call initialization
         throw new Error('Microphone permission is required.');
       }
     }
-    
-    // For iOS, we assume permissions are handled differently
     return true;
   };
 
+  // ── FIX: Audio constraints — echoCancellation + noiseSuppression ──────────
+  // This is the most impactful audio quality change. Without these constraints,
+  // getUserMedia returns a raw audio track with no DSP — echo, noise, and
+  // volume fluctuations are all unmanaged. These match WhatsApp's profile.
   const getLocalStream = async (): Promise<MediaStream> => {
-    const s = await mediaDevices.getUserMedia({ audio: true, video: false });
+    const s = await mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+        sampleRate: 48000,
+        channelCount: 1, // mono — halves bitrate, no quality loss for voice
+      } as any,
+      video: false,
+    });
     return s as unknown as MediaStream;
   };
 
@@ -462,13 +537,16 @@ const VoiceCall = () => {
       '0',
     )}`;
 
-  // ── Render ────────────────────────────────────────────────────────────────
+  // ── Render ─────────────────────────────────────────────────────────────────
   const isConnected = connectionState === 'connected';
   const statusLabel = isConnected
     ? formatTime(callDuration)
     : callStatus === 'calling'
     ? 'Ringing…'
     : STATUS_LABEL[connectionState] ?? connectionState;
+
+  const qualityBars = networkQuality ? QUALITY_BARS[networkQuality] : null;
+  const qualityColor = networkQuality ? QUALITY_COLORS[networkQuality] : '#fff';
 
   return (
     <SafeAreaView style={styles.root}>
@@ -479,13 +557,51 @@ const VoiceCall = () => {
       />
 
       <View style={styles.callInfo}>
-        <View style={styles.avatar}>
-          <Text style={styles.avatarLetter}>
-            {(userData?.name?.[0] ?? 'U').toUpperCase()}
-          </Text>
-        </View>
+        {/* NEW: speaking pulse ring around avatar */}
+        <Animated.View
+          style={[
+            styles.avatarRingOuter,
+            // remoteSpeaking && { transform: [{ scale: speakingPulse }] },
+            // remoteSpeaking ? styles.avatarRingActive : styles.avatarRingIdle,
+          ]}
+        >
+          <View style={styles.avatar}>
+            <Text style={styles.avatarLetter}>
+              {(userData?.name?.[0] ?? 'U').toUpperCase()}
+            </Text>
+          </View>
+        </Animated.View>
+
         <Text style={styles.name}>{userData?.name ?? 'User'}</Text>
         <Text style={styles.status}>{statusLabel}</Text>
+
+        {/* NEW: network quality signal bars */}
+        {isConnected && qualityBars !== null && (
+          <View style={styles.qualityRow}>
+            {[1, 2, 3].map(i => (
+              <View
+                key={i}
+                style={[
+                  styles.qualityBar,
+                  { height: 6 + i * 5 },
+                  {
+                    backgroundColor:
+                      i <= qualityBars ? qualityColor : 'rgba(255,255,255,0.2)',
+                  },
+                ]}
+              />
+            ))}
+            <Text style={[styles.qualityLabel, { color: qualityColor }]}>
+              {networkQuality === 'good'
+                ? 'Excellent'
+                : networkQuality === 'fair'
+                ? 'Fair'
+                : 'Poor'}
+            </Text>
+          </View>
+        )}
+
+      
       </View>
 
       <View style={styles.controls}>
@@ -553,6 +669,17 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     paddingHorizontal: 20,
   },
+
+  // NEW: outer animated ring for speaking indicator
+  avatarRingOuter: {
+    padding: 6,
+    borderRadius: 70,
+    // borderWidth: 3,
+    marginBottom: 18,
+  },
+  // avatarRingIdle: { borderColor: 'transparent' },
+  // avatarRingActive: { borderColor: '#43d16e' },
+
   avatar: {
     width: 120,
     height: 120,
@@ -562,11 +689,42 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     borderWidth: 3,
     borderColor: '#4a9fff',
-    marginBottom: 18,
   },
   avatarLetter: { fontSize: 52, color: '#fff', fontWeight: '700' },
   name: { color: '#fff', fontSize: 28, fontWeight: '600', marginBottom: 8 },
-  status: { color: '#8899bb', fontSize: 15 },
+  status: { color: '#8899bb', fontSize: 15, marginBottom: 16 },
+
+  // NEW: quality bars
+  qualityRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    gap: 3,
+    marginTop: 8,
+  },
+  qualityBar: { width: 5, borderRadius: 3 },
+  qualityLabel: { fontSize: 12, marginLeft: 6, fontWeight: '500' },
+
+  // NEW: speaking badge
+  speakingBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 14,
+    backgroundColor: 'rgba(67,209,110,0.15)',
+    borderRadius: 20,
+    paddingHorizontal: 14,
+    paddingVertical: 6,
+    borderWidth: 1,
+    borderColor: 'rgba(67,209,110,0.4)',
+    gap: 6,
+  },
+  speakingDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: '#43d16e',
+  },
+  speakingText: { color: '#43d16e', fontSize: 13, fontWeight: '500' },
+
   controls: { paddingBottom: 48, paddingTop: 20, paddingHorizontal: 24 },
   controlRow: {
     flexDirection: 'row',

@@ -9,6 +9,7 @@ import {
   Dimensions,
   StatusBar,
   ActivityIndicator,
+  Vibration,
 } from 'react-native';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { useAuth } from '../../core/context/AuthContext';
@@ -23,6 +24,9 @@ try {
 
 const { width } = Dimensions.get('window');
 const AUTO_DECLINE_SEC = 60;
+
+// ── Vibration pattern matching WhatsApp's incoming call pulse ─────────────────
+const VIBRATION_PATTERN = [0, 400, 200, 400, 200, 400];
 
 const IncomingCallScreen = () => {
   const navigation = useNavigation<any>();
@@ -48,27 +52,38 @@ const IncomingCallScreen = () => {
   const [accepting, setAccepting] = useState(false);
 
   const pulseAnim = useRef(new Animated.Value(1)).current;
+  // NEW: second outer ring for more WhatsApp-like pulse effect
+  const pulseAnim2 = useRef(new Animated.Value(1)).current;
+  const pulseOpacity2 = useRef(new Animated.Value(0.6)).current;
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const handledRef = useRef(false);
+  const vibrationRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
+    // ── Start ringtone ─────────────────────────────────────────────────────
     if (InCallManager) InCallManager.startRingtone('_BUNDLE_');
 
-    const pulse = Animated.loop(
+    // ── NEW: Vibration pattern (repeating) ────────────────────────────────
+    Vibration.vibrate(VIBRATION_PATTERN, true);
+
+    // ── Inner pulse ────────────────────────────────────────────────────────
+    const innerPulse = Animated.loop(
       Animated.sequence([
-        Animated.timing(pulseAnim, {
-          toValue: 1.14,
-          duration: 650,
-          useNativeDriver: true,
-        }),
-        Animated.timing(pulseAnim, {
-          toValue: 1,
-          duration: 650,
-          useNativeDriver: true,
-        }),
+        Animated.timing(pulseAnim, { toValue: 1.10, duration: 700, useNativeDriver: true }),
+        Animated.timing(pulseAnim, { toValue: 1, duration: 700, useNativeDriver: true }),
       ]),
     );
-    pulse.start();
+
+    // ── NEW: Outer expanding ring (like WhatsApp) ──────────────────────────
+    const outerPulse = Animated.loop(
+      Animated.parallel([
+        Animated.timing(pulseAnim2, { toValue: 1.35, duration: 1400, useNativeDriver: true }),
+        Animated.timing(pulseOpacity2, { toValue: 0, duration: 1400, useNativeDriver: true }),
+      ]),
+    );
+
+    innerPulse.start();
+    outerPulse.start();
     loadAvatar();
 
     timerRef.current = setInterval(() => {
@@ -82,9 +97,11 @@ const IncomingCallScreen = () => {
     }, 1000);
 
     return () => {
-      pulse.stop();
+      innerPulse.stop();
+      outerPulse.stop();
       if (timerRef.current) clearInterval(timerRef.current);
       if (InCallManager) InCallManager.stopRingtone();
+      Vibration.cancel();
     };
   }, []);
 
@@ -100,22 +117,10 @@ const IncomingCallScreen = () => {
   };
 
   // ─────────────────────────────────────────────────────────────────────────
-  //  ACCEPT  —  order is critical
-  //
-  //  1. await write status='answered'
-  //     The caller's VideoCall is stuck in a Firestore snapshot waiting for
-  //     this exact value. Nothing happens until this resolves.
-  //
-  //  2. navigate immediately (synchronous after the await)
-  //     VideoCall.initialize(false) will now only write participant metadata
-  //     (not status), so 'answered' remains in Firestore and the caller's
-  //     acceptListenerRef fires exactly once.
-  //
+  //  ACCEPT — order is critical:
+  //  1. await write status='answered'  → unblocks caller's snapshot listener
+  //  2. navigate immediately after the await
   //  3. clearIncomingCall AFTER navigation (fire-and-forget)
-  //     If cleared before navigation, NotificationHandler resets its guard
-  //     (lastShownCallId = null) while VideoCall is still booting — a stale
-  //     Firestore cache snapshot can then re-open IncomingCallScreen on top
-  //     of the live call.
   // ─────────────────────────────────────────────────────────────────────────
   const acceptCall = async () => {
     if (handledRef.current) return;
@@ -124,6 +129,7 @@ const IncomingCallScreen = () => {
 
     if (timerRef.current) clearInterval(timerRef.current);
     if (InCallManager) InCallManager.stopRingtone();
+    Vibration.cancel();
 
     try {
       // Step 1 — unlock the caller (MUST be awaited)
@@ -133,13 +139,12 @@ const IncomingCallScreen = () => {
         .update({
           status: 'answered',
           answeredAt: firestore.FieldValue.serverTimestamp(),
-          [`participants.${user?.uid}.answeredAt`]:
-            firestore.FieldValue.serverTimestamp(),
+          [`participants.${user?.uid}.answeredAt`]: firestore.FieldValue.serverTimestamp(),
         });
       console.log('[IncomingCall] status=answered written to Firestore');
     } catch (err) {
       console.error('[IncomingCall] Failed to write answered status:', err);
-      // Still navigate — call may still work if network recovers
+      // Still navigate — call may recover on good network
     }
 
     // Step 2 — navigate into call screen
@@ -165,6 +170,7 @@ const IncomingCallScreen = () => {
 
     if (timerRef.current) clearInterval(timerRef.current);
     if (InCallManager) InCallManager.stopRingtone();
+    Vibration.cancel();
 
     try {
       await firestore()
@@ -172,12 +178,11 @@ const IncomingCallScreen = () => {
         .doc(callId)
         .update({
           status: 'ended',
-          [`participants.${user?.uid}.rejectedAt`]:
-            firestore.FieldValue.serverTimestamp(),
+          [`participants.${user?.uid}.rejectedAt`]: firestore.FieldValue.serverTimestamp(),
           endedAt: firestore.FieldValue.serverTimestamp(),
         });
 
-      // Notify caller
+      // Notify caller of missed call
       const callSnap = await firestore().collection('calls').doc(callId).get();
       const data = callSnap.data();
       const initiator = data?.callerId ?? data?.initiatedBy;
@@ -196,11 +201,26 @@ const IncomingCallScreen = () => {
     navigation.goBack();
   };
 
+  // ── Progress ring for auto-decline countdown ───────────────────────────────
+  const progressRatio = timeLeft / AUTO_DECLINE_SEC;
+
   return (
     <View style={styles.root}>
       <StatusBar hidden />
 
       <View style={styles.callerSection}>
+        {/* Outer expanding pulse ring — WhatsApp style */}
+        <Animated.View
+          style={[
+            styles.avatarRingOuter,
+            {
+              transform: [{ scale: pulseAnim2 }],
+              opacity: pulseOpacity2,
+            },
+          ]}
+        />
+
+        {/* Inner pulsing ring */}
         <Animated.View
           style={[styles.avatarRing, { transform: [{ scale: pulseAnim }] }]}
         >
@@ -218,16 +238,16 @@ const IncomingCallScreen = () => {
         <Text style={styles.callerName}>{callerName ?? 'Unknown'}</Text>
 
         <View style={styles.badge}>
-          <Feather
-            name={type === 'video' ? 'video' : 'phone'}
-            size={13}
-            color="#fff"
-          />
+          <Feather name={type === 'video' ? 'video' : 'phone'} size={13} color="#fff" />
           <Text style={styles.badgeText}>
             Incoming {type === 'video' ? 'video' : 'voice'} call
           </Text>
         </View>
 
+        {/* NEW: thin progress bar showing auto-decline countdown */}
+        <View style={styles.progressTrack}>
+          <View style={[styles.progressFill, { width: `${progressRatio * 100}%` as any }]} />
+        </View>
         <Text style={styles.autoDecline}>Auto-declining in {timeLeft}s</Text>
       </View>
 
@@ -246,11 +266,7 @@ const IncomingCallScreen = () => {
 
         <View style={styles.actionItem}>
           <TouchableOpacity
-            style={[
-              styles.actionBtn,
-              styles.acceptBtn,
-              accepting && styles.acceptBtnBusy,
-            ]}
+            style={[styles.actionBtn, styles.acceptBtn, accepting && styles.acceptBtnBusy]}
             onPress={acceptCall}
             activeOpacity={0.8}
             disabled={accepting}
@@ -258,11 +274,7 @@ const IncomingCallScreen = () => {
             {accepting ? (
               <ActivityIndicator color="#fff" size="small" />
             ) : (
-              <Feather
-                name={type === 'video' ? 'video' : 'phone'}
-                size={30}
-                color="#fff"
-              />
+              <Feather name={type === 'video' ? 'video' : 'phone'} size={30} color="#fff" />
             )}
           </TouchableOpacity>
           <Text style={styles.actionLabel}>Accept</Text>
@@ -287,6 +299,19 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
   },
+
+  // NEW: outer expanding ring (WhatsApp-style)
+  avatarRingOuter: {
+    top:70,
+    position: 'absolute',
+    width: 200,
+    height: 200,
+    borderRadius: 100,
+    borderWidth: 2,
+    borderColor: '#4caf50',
+    backgroundColor: 'rgba(76,175,80,0.08)',
+  },
+
   avatarRing: {
     width: 160,
     height: 160,
@@ -321,10 +346,26 @@ const styles = StyleSheet.create({
     paddingVertical: 6,
     borderWidth: 1,
     borderColor: 'rgba(76,175,80,0.4)',
-    marginBottom: 20,
+    marginBottom: 24,
   },
   badgeText: { color: '#aee6b0', fontSize: 14, fontWeight: '500' },
+
+  // NEW: countdown progress bar
+  progressTrack: {
+    width: 180,
+    height: 3,
+    backgroundColor: 'rgba(255,255,255,0.1)',
+    borderRadius: 2,
+    marginBottom: 10,
+    overflow: 'hidden',
+  },
+  progressFill: {
+    height: '100%',
+    backgroundColor: '#4caf50',
+    borderRadius: 2,
+  },
   autoDecline: { color: '#555', fontSize: 13 },
+
   actions: {
     flexDirection: 'row',
     justifyContent: 'space-around',

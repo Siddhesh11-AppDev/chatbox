@@ -13,12 +13,16 @@ import {
   Animated,
   PanResponder,
   Linking,
+  AppState,
 } from 'react-native';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { RTCView, mediaDevices, MediaStream } from 'react-native-webrtc';
 import Feather from 'react-native-vector-icons/Feather';
 import MaterialIcons from 'react-native-vector-icons/MaterialIcons';
-import { FirebaseWebRTCService } from '../../core/services/FirebaseWebRTCService';
+import {
+  FirebaseWebRTCService,
+  NetworkStats,
+} from '../../core/services/FirebaseWebRTCService';
 import { useAuth } from '../../core/context/AuthContext';
 import firestore from '@react-native-firebase/firestore';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -57,6 +61,8 @@ const STATUS_LABEL: Record<string, string> = {
   closed: 'Call ended',
 };
 
+const QUALITY_BARS: Record<string, number> = { good: 3, fair: 2, poor: 1 };
+
 const VideoCall = () => {
   const navigation = useNavigation<any>();
   const route = useRoute();
@@ -71,13 +77,8 @@ const VideoCall = () => {
   };
   const { user, userProfile } = useAuth();
 
-  // FIX 1: Store URL strings, NOT MediaStream objects.
-  // RTCView requires a stable string URL. Storing a MediaStream object in state
-  // means React can't detect when it changes (object ref stays the same),
-  // so RTCView never re-renders → blank video. toURL() gives a stable string.
   const [localStreamURL, setLocalStreamURL] = useState<string | null>(null);
   const [remoteStreamURL, setRemoteStreamURL] = useState<string | null>(null);
-
   const [isMuted, setIsMuted] = useState(false);
   const [isVideoOff, setIsVideoOff] = useState(false);
   const [isSpeaker, setIsSpeaker] = useState(true);
@@ -86,11 +87,10 @@ const VideoCall = () => {
     useState<ConnectionState>('initializing');
   const [callStatus, setCallStatus] = useState('initializing');
   const [callDuration, setCallDuration] = useState(0);
-
-  // FIX 2: Removed controlsVisible state.
-  // Toggling controlsVisible unmounts/remounts the Animated.View while its
-  // opacity animation is still running → flicker & RN warnings.
-  // Solution: keep controls always mounted, control visibility via opacity only.
+  const [networkQuality, setNetworkQuality] = useState<
+    'good' | 'fair' | 'poor' | null
+  >(null);
+  const [remoteSpeaking, setRemoteSpeaking] = useState(false);
 
   const webRTCServiceRef = useRef<FirebaseWebRTCService | null>(null);
   const callIdRef = useRef('');
@@ -102,20 +102,13 @@ const VideoCall = () => {
   const callTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const acceptListenerRef = useRef<(() => void) | null>(null);
   const cleanedRef = useRef(false);
-  // FIX 3: Use mountedRef instead of `cancelled` closure variable.
-  // The `cancelled` pattern breaks when doCleanup() is called from outside
-  // the init closure (e.g. endCall). mountedRef is always reachable.
   const mountedRef = useRef(true);
   const pendingOfferRef = useRef<any>(null);
   const readyToAnswerRef = useRef(false);
-  // FIX 4: connectionStateRef so showControls() never captures stale state.
   const connectionStateRef = useRef<ConnectionState>('initializing');
+  const speakingTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const speakingPulse = useRef(new Animated.Value(1)).current;
 
-  // FIX 5: PIP uses separate pipX / pipY Animated.Values applied as left/top.
-  // The old code used pipPan.getTranslateTransform() on a position:absolute view.
-  // transform:translate adds ON TOP of the view's existing position → double
-  // offset, so PIP appeared at wrong coordinates and jumped around on drag.
-  // Using left/top directly is the correct pattern for draggable absolute views.
   const pipX = useRef(new Animated.Value(PIP_INIT_X)).current;
   const pipY = useRef(new Animated.Value(PIP_INIT_Y)).current;
 
@@ -123,23 +116,23 @@ const VideoCall = () => {
     PanResponder.create({
       onStartShouldSetPanResponder: () => true,
       onPanResponderGrant: () => {
-        // extractOffset captures current value so dx/dy starts from 0
         pipX.extractOffset();
         pipY.extractOffset();
       },
-      onPanResponderMove: Animated.event(
-        [null, { dx: pipX, dy: pipY }],
-        { useNativeDriver: false },
-      ),
+      onPanResponderMove: Animated.event([null, { dx: pipX, dy: pipY }], {
+        useNativeDriver: false,
+      }),
       onPanResponderRelease: () => {
         pipX.flattenOffset();
         pipY.flattenOffset();
         const cx = (pipX as any)._value;
         const cy = (pipY as any)._value;
-        // Snap PIP to nearest left/right edge
         const targetX =
           cx + PIP_W / 2 < width / 2 ? PIP_MARGIN : width - PIP_W - PIP_MARGIN;
-        const targetY = Math.max(PIP_MARGIN, Math.min(cy, height - PIP_H - 120));
+        const targetY = Math.max(
+          PIP_MARGIN,
+          Math.min(cy, height - PIP_H - 120),
+        );
         Animated.spring(pipX, {
           toValue: targetX,
           useNativeDriver: false,
@@ -156,9 +149,6 @@ const VideoCall = () => {
     }),
   ).current;
 
-  // FIX 6: showControls uses connectionStateRef (not connectionState closure).
-  // useCallback with connectionState in deps still captures a stale value when
-  // called from gesture handlers. Reading from a ref is always fresh.
   const showControls = useCallback(() => {
     if (controlsTimerRef.current) clearTimeout(controlsTimerRef.current);
     Animated.timing(controlsOpacity, {
@@ -176,9 +166,8 @@ const VideoCall = () => {
         }).start();
       }, 4000);
     }
-  }, []); // stable — only uses refs, no stale closures
+  }, []);
 
-  // Keep ref in sync with state, and reset auto-hide on state change
   useEffect(() => {
     connectionStateRef.current = connectionState;
     if (connectionState === 'connected') {
@@ -193,11 +182,54 @@ const VideoCall = () => {
     }
   }, [connectionState]);
 
-  // ── INIT ─────────────────────────────────────────────────────────────────
   useEffect(() => {
-    // Reset flags on every mount
+    if (remoteSpeaking) {
+      Animated.loop(
+        Animated.sequence([
+          Animated.timing(speakingPulse, {
+            toValue: 1.08,
+            duration: 400,
+            useNativeDriver: true,
+          }),
+          Animated.timing(speakingPulse, {
+            toValue: 1,
+            duration: 400,
+            useNativeDriver: true,
+          }),
+        ]),
+      ).start();
+    } else {
+      speakingPulse.stopAnimation();
+      Animated.spring(speakingPulse, {
+        toValue: 1,
+        useNativeDriver: true,
+      }).start();
+    }
+  }, [remoteSpeaking]);
+
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', nextState => {
+      if (!mountedRef.current) return;
+      if (nextState === 'background' && InCallManager) {
+        InCallManager.setKeepScreenOn(false);
+      } else if (nextState === 'active' && InCallManager) {
+        InCallManager.setKeepScreenOn(true);
+        if (connectionStateRef.current === 'connected') {
+          InCallManager.setForceSpeakerphoneOn(isSpeaker);
+        }
+      }
+    });
+    return () => sub.remove();
+  }, [isSpeaker]);
+
+  useEffect(() => {
     mountedRef.current = true;
     cleanedRef.current = false;
+
+    if (InCallManager) {
+      InCallManager.start({ media: 'video' });
+      InCallManager.setForceSpeakerphoneOn(true);
+    }
 
     const init = async () => {
       try {
@@ -212,48 +244,43 @@ const VideoCall = () => {
         const isCaller = !isIncomingCall;
         isCallerRef.current = isCaller;
 
-        console.log(`[VideoCall] init — isCaller:${isCaller} callId:${callId}`);
-
         const service = new FirebaseWebRTCService(
           callId,
           user!.uid,
           (stream: MediaStream) => {
             if (!mountedRef.current) return;
-            console.log('[VideoCall] ✅ Remote stream received');
-            // Store the URL string, not the object — RTCView renders immediately
             setRemoteStreamURL(stream.toURL());
+            startSpeakingDetection(stream);
           },
           (state: string) => {
             if (!mountedRef.current) return;
-            console.log('[VideoCall] Connection state →', state);
             setConnectionState(state as ConnectionState);
-            if (state === 'connected') setCallStatus('connected');
-            if (state === 'closed')
-              doCleanup().then(() => navigation.goBack());
+            if (state === 'connected') {
+              setCallStatus('connected');
+              if (InCallManager) InCallManager.setForceSpeakerphoneOn(true);
+            }
+            if (state === 'closed') doCleanup().then(() => navigation.goBack());
           },
           (err: string) => {
             if (!mountedRef.current) return;
             handleError(err);
           },
           isCaller ? undefined : handleOfferReceived,
+          (stats: NetworkStats) => {
+            if (!mountedRef.current) return;
+            setNetworkQuality(stats.quality);
+          },
         );
         webRTCServiceRef.current = service;
 
-        // FIX 7: Get local stream FIRST before any signaling.
-        // Original code started the stream after initialize() and sendCallNotification(),
-        // which could take 2–4 seconds. User saw a blank PIP the whole time.
-        // Getting the stream first means your face appears immediately on screen.
         const stream = await getLocalStream();
         if (!mountedRef.current) {
           stream.getTracks().forEach(t => t.stop());
           return;
         }
         localStreamRef.current = stream;
-        // Set URL string — RTCView renders your face right now
         setLocalStreamURL(stream.toURL());
-        console.log('[VideoCall] ✅ Local stream ready, face visible');
 
-        // ── CALLER ─────────────────────────────────────────────────────────
         if (isCaller) {
           setCallStatus('calling');
 
@@ -267,23 +294,14 @@ const VideoCall = () => {
             callId,
             callType: 'video',
           });
-          console.log('[VideoCall] Call notification sent');
 
           if (!mountedRef.current) return;
 
           await service.initialize(true);
-          console.log('[VideoCall] Caller initialized');
 
           if (!mountedRef.current) return;
-
           await service.addLocalStream(stream);
 
-          if (InCallManager) {
-            InCallManager.start({ media: 'video' });
-            InCallManager.setForceSpeakerphoneOn(true);
-          }
-
-          // 60-second no-answer timeout
           callTimeoutRef.current = setTimeout(() => {
             if (!mountedRef.current) return;
             Alert.alert('No Answer', 'The call was not answered.', [
@@ -297,14 +315,12 @@ const VideoCall = () => {
             ]);
           }, 60000);
 
-          // Wait for callee to accept (status='answered'), then create offer
           acceptListenerRef.current = firestore()
             .collection('calls')
             .doc(callId)
             .onSnapshot(doc => {
               if (!mountedRef.current) return;
               const status = doc.data()?.status;
-              console.log('[VideoCall] Call doc status →', status);
 
               if (status === 'answered') {
                 if (callTimeoutRef.current) {
@@ -318,10 +334,8 @@ const VideoCall = () => {
                 setConnectionState('connecting');
                 setCallStatus('connecting');
 
-                console.log('[VideoCall] Callee answered — creating offer');
                 service.createOffer(false).catch(err => {
                   if (!mountedRef.current) return;
-                  console.error('[VideoCall] createOffer failed:', err);
                   handleError('Failed to start call: ' + err.message);
                 });
               } else if (status === 'ended') {
@@ -336,35 +350,20 @@ const VideoCall = () => {
                   doCleanup().then(() => navigation.goBack());
               }
             });
-
-          // ── CALLEE ─────────────────────────────────────────────────────────
         } else {
           setCallStatus('receiving');
 
           await service.initialize(false);
-          console.log('[VideoCall] Callee initialized');
 
           if (!mountedRef.current) return;
-
           await service.addLocalStream(stream);
 
-          // Mark ready, drain any pending offer that arrived early
           readyToAnswerRef.current = true;
-          console.log(
-            '[VideoCall] Callee ready. Pending offer:',
-            !!pendingOfferRef.current,
-          );
           if (pendingOfferRef.current) {
             await service.handleRemoteOffer(pendingOfferRef.current);
             pendingOfferRef.current = null;
           }
 
-          if (InCallManager) {
-            InCallManager.start({ media: 'video' });
-            InCallManager.setForceSpeakerphoneOn(true);
-          }
-
-          // Watch for caller cancelling
           const unsubCancel = notificationService.listenForCallCancellation(
             callId,
             () => {
@@ -376,7 +375,6 @@ const VideoCall = () => {
         }
       } catch (err: any) {
         if (mountedRef.current) {
-          console.error('[VideoCall] Init error:', err);
           Alert.alert('Error', 'Could not start call: ' + err.message);
           navigation.goBack();
         }
@@ -390,14 +388,12 @@ const VideoCall = () => {
     };
   }, []);
 
-  // ── Duration timer ────────────────────────────────────────────────────────
   useEffect(() => {
     if (connectionState === 'connected') {
       callTimerRef.current = setInterval(
         () => setCallDuration(d => d + 1),
         1000,
       );
-      if (InCallManager) InCallManager.setForceSpeakerphoneOn(true);
     } else {
       if (callTimerRef.current) {
         clearInterval(callTimerRef.current);
@@ -409,20 +405,26 @@ const VideoCall = () => {
     };
   }, [connectionState]);
 
-  // ── Offer handler (callee only) ───────────────────────────────────────────
+  const startSpeakingDetection = (stream: MediaStream) => {
+    try {
+      speakingTimerRef.current = setInterval(async () => {
+        if (!mountedRef.current || !webRTCServiceRef.current) return;
+        const stats = await webRTCServiceRef.current.getNetworkStats();
+        if (!stats) return;
+        setRemoteSpeaking(stats.jitter > 0.005);
+      }, 600);
+    } catch (_) {}
+  };
+
   const handleOfferReceived = async (offerData: any) => {
-    console.log(
-      '[VideoCall] Offer arrived. ready:',
-      readyToAnswerRef.current,
-      'has offer:',
-      !!offerData?.offer,
-    );
     if (!readyToAnswerRef.current) {
-      pendingOfferRef.current = offerData.offer;
+      pendingOfferRef.current = offerData.offer ?? offerData;
       return;
     }
     try {
-      await webRTCServiceRef.current?.handleRemoteOffer(offerData.offer);
+      await webRTCServiceRef.current?.handleRemoteOffer(
+        offerData.offer ?? offerData,
+      );
     } catch (err) {
       handleError('Failed to connect to call');
     }
@@ -439,10 +441,10 @@ const VideoCall = () => {
     }
   };
 
-  // ── Cleanup ───────────────────────────────────────────────────────────────
   const doCleanup = async () => {
     if (cleanedRef.current) return;
     cleanedRef.current = true;
+
     if (controlsTimerRef.current) clearTimeout(controlsTimerRef.current);
     if (callTimerRef.current) clearInterval(callTimerRef.current);
     if (callTimeoutRef.current) {
@@ -453,12 +455,19 @@ const VideoCall = () => {
       acceptListenerRef.current();
       acceptListenerRef.current = null;
     }
+    if (speakingTimerRef.current) {
+      clearInterval(speakingTimerRef.current);
+      speakingTimerRef.current = null;
+    }
+
     const cancelUnsub = (callIdRef as any).cancelUnsub;
     if (cancelUnsub) {
       cancelUnsub();
       (callIdRef as any).cancelUnsub = null;
     }
+
     if (InCallManager) InCallManager.stop();
+
     if (webRTCServiceRef.current) {
       await webRTCServiceRef.current.endCall();
       webRTCServiceRef.current = null;
@@ -467,6 +476,7 @@ const VideoCall = () => {
       localStreamRef.current.getTracks().forEach(t => t.stop());
       localStreamRef.current = null;
     }
+
     try {
       if (!isCallerRef.current && user)
         await notificationService.clearIncomingCall(user.uid);
@@ -476,6 +486,7 @@ const VideoCall = () => {
           userData.uid,
         );
     } catch (_) {}
+
     notificationService.resetCallState();
   };
 
@@ -490,12 +501,14 @@ const VideoCall = () => {
     });
     setIsMuted(m => !m);
   };
+
   const toggleVideo = () => {
     localStreamRef.current?.getVideoTracks().forEach(t => {
       t.enabled = !t.enabled;
     });
     setIsVideoOff(v => !v);
   };
+
   const toggleSpeaker = () => {
     if (InCallManager) {
       const n = !isSpeaker;
@@ -503,6 +516,7 @@ const VideoCall = () => {
       setIsSpeaker(n);
     }
   };
+
   const switchCamera = () => {
     const t = localStreamRef.current?.getVideoTracks()[0] as any;
     if (t?._switchCamera) {
@@ -511,30 +525,25 @@ const VideoCall = () => {
     }
   };
 
-  // Your original improved permission handler — kept as-is
   const requestPermissions = async () => {
     if (Platform.OS === 'android') {
       const cameraPermission = PermissionsAndroid.PERMISSIONS.CAMERA;
       const audioPermission = PermissionsAndroid.PERMISSIONS.RECORD_AUDIO;
-
       const permissions = await PermissionsAndroid.requestMultiple([
         cameraPermission,
         audioPermission,
       ]);
-
       const cameraGranted = permissions[cameraPermission] === 'granted';
       const audioGranted = permissions[audioPermission] === 'granted';
-
       if (!cameraGranted || !audioGranted) {
-        const deniedPermissions = [];
-        if (!cameraGranted) deniedPermissions.push('camera');
-        if (!audioGranted) deniedPermissions.push('microphone');
-
+        const denied = [];
+        if (!cameraGranted) denied.push('camera');
+        if (!audioGranted) denied.push('microphone');
         Alert.alert(
           'Permissions Required',
-          `The ${deniedPermissions.join(' and ')} permission${
-            deniedPermissions.length > 1 ? 's are' : ' is'
-          } required for video calls. Please enable it in Settings.`,
+          `The ${denied.join(' and ')} permission${
+            denied.length > 1 ? 's are' : ' is'
+          } required for video calls.`,
           [
             {
               text: 'Cancel',
@@ -543,7 +552,7 @@ const VideoCall = () => {
             },
             {
               text: 'Settings',
-              onPress: async () => {
+              onPress: () => {
                 Linking.openSettings();
                 setTimeout(() => navigation.goBack(), 1000);
               },
@@ -558,7 +567,13 @@ const VideoCall = () => {
 
   const getLocalStream = async (): Promise<MediaStream> => {
     const s = await mediaDevices.getUserMedia({
-      audio: true,
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+        sampleRate: 48000,
+        channelCount: 1,
+      } as any,
       video: {
         facingMode: 'user',
         width: { ideal: 1280 },
@@ -575,34 +590,35 @@ const VideoCall = () => {
       '0',
     )}`;
 
-  // ── Render ────────────────────────────────────────────────────────────────
   const isConnected = connectionState === 'connected';
   const isRinging = callStatus === 'calling';
   const statusLabel = STATUS_LABEL[connectionState] ?? connectionState;
+  const qualityBars = networkQuality ? QUALITY_BARS[networkQuality] : null;
 
   return (
     <TouchableWithoutFeedback onPress={showControls}>
       <View style={styles.root}>
         <StatusBar hidden />
 
-        {/*
-          ══════════════════════════════════════════════════════════
-          REMOTE VIDEO — full screen background
-          zOrder={0}: Android SurfaceView renders below all RN views
-          ══════════════════════════════════════════════════════════
-        */}
+        {/* REMOTE VIDEO — full screen, no mirror */}
         {remoteStreamURL ? (
-          <RTCView
-            key="remote-video"
-            streamURL={remoteStreamURL}
-            style={styles.remoteVideo}
-            objectFit="cover"
-            zOrder={0}
-            mirror={false}
-          />
+          <Animated.View style={StyleSheet.absoluteFill}>
+            <RTCView
+              key="remote-video"
+              streamURL={remoteStreamURL}
+              style={styles.remoteVideo}
+              objectFit="cover"
+              zOrder={0}
+            />
+          </Animated.View>
         ) : (
           <View style={styles.remotePlaceholder}>
-            <View style={styles.avatarCircle}>
+            <View
+              style={[
+                styles.avatarCircle,
+                remoteSpeaking && styles.avatarSpeaking,
+              ]}
+            >
               <Text style={styles.avatarLetter}>
                 {(userData?.name?.[0] ?? 'U').toUpperCase()}
               </Text>
@@ -616,12 +632,34 @@ const VideoCall = () => {
           </View>
         )}
 
-        {/* Top bar — name + timer */}
+        {/* TOP BAR */}
         <Animated.View
           style={[styles.topBar, { opacity: controlsOpacity }]}
           pointerEvents="none"
         >
-          <Text style={styles.remoteName}>{userData?.name ?? 'User'}</Text>
+          <View style={styles.topBarRow}>
+            <Text style={styles.remoteName}>{userData?.name ?? 'User'}</Text>
+            {qualityBars !== null && isConnected && (
+              <View style={styles.qualityBars}>
+                {[1, 2, 3].map(i => (
+                  <View
+                    key={i}
+                    style={[
+                      styles.qualityBar,
+                      { height: 6 + i * 4 },
+                      i <= qualityBars
+                        ? networkQuality === 'good'
+                          ? styles.qualityGood
+                          : networkQuality === 'fair'
+                          ? styles.qualityFair
+                          : styles.qualityPoor
+                        : styles.qualityInactive,
+                    ]}
+                  />
+                ))}
+              </View>
+            )}
+          </View>
           <Text style={styles.duration}>
             {isConnected
               ? formatTime(callDuration)
@@ -631,19 +669,7 @@ const VideoCall = () => {
           </Text>
         </Animated.View>
 
-        {/*
-          ══════════════════════════════════════════════════════════
-          LOCAL PIP — your face, draggable thumbnail
-
-          FIX: left={pipX} top={pipY} instead of getTranslateTransform()
-               transform:translate adds to existing position → double offset.
-               left/top on position:absolute = correct pixel coordinates.
-
-          FIX: zOrder={1} so Android SurfaceView renders ABOVE remote video.
-               Without this, the PIP SurfaceView renders behind the remote
-               RTCView regardless of JSX order.
-          ══════════════════════════════════════════════════════════
-        */}
+        {/* LOCAL PIP — no mirror prop */}
         <Animated.View
           style={[styles.pipContainer, { left: pipX, top: pipY }]}
           {...pipPanResponder.panHandlers}
@@ -655,7 +681,6 @@ const VideoCall = () => {
               style={StyleSheet.absoluteFill}
               objectFit="cover"
               zOrder={1}
-              mirror={isFrontCamera}
             />
           ) : (
             <View style={[styles.pipVideo, styles.pipPlaceholder]}>
@@ -666,17 +691,8 @@ const VideoCall = () => {
           )}
         </Animated.View>
 
-        {/*
-          ══════════════════════════════════════════════════════════
-          CONTROLS — always mounted, fades via opacity only.
-          Conditional rendering ({controlsVisible && ...}) caused
-          flicker because the Animated.View was unmounted while its
-          opacity animation was still running.
-          ══════════════════════════════════════════════════════════
-        */}
-        <Animated.View
-          style={[styles.controls, { opacity: controlsOpacity }]}
-        >
+        {/* CONTROLS */}
+        <Animated.View style={[styles.controls, { opacity: controlsOpacity }]}>
           <View style={styles.controlRow}>
             <ControlBtn
               icon={isSpeaker ? 'volume-2' : 'volume-x'}
@@ -765,11 +781,7 @@ export default VideoCall;
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: '#1a1a2e' },
 
-  // Remote video — full screen
-  remoteVideo: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: '#000',
-  },
+  remoteVideo: { ...StyleSheet.absoluteFillObject, backgroundColor: '#000' },
   remotePlaceholder: {
     ...StyleSheet.absoluteFillObject,
     justifyContent: 'center',
@@ -787,6 +799,7 @@ const styles = StyleSheet.create({
     borderColor: '#4a9fff',
     marginBottom: 18,
   },
+  avatarSpeaking: { borderColor: '#43d16e', borderWidth: 4 },
   avatarLetter: { fontSize: 52, color: '#fff', fontWeight: '700' },
   remoteNameText: {
     color: '#fff',
@@ -796,7 +809,6 @@ const styles = StyleSheet.create({
   },
   statusLabel: { color: '#8899bb', fontSize: 15 },
 
-  // Top bar
   topBar: {
     position: 'absolute',
     top: 0,
@@ -809,6 +821,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     zIndex: 10,
   },
+  topBarRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
   remoteName: {
     color: '#fff',
     fontSize: 18,
@@ -822,14 +835,24 @@ const styles = StyleSheet.create({
     letterSpacing: 0.5,
   },
 
-  // PIP — your face
-  // position:'absolute' required so left/top work as screen coordinates
+  qualityBars: {
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    gap: 2,
+    marginLeft: 6,
+  },
+  qualityBar: { width: 4, borderRadius: 2 },
+  qualityGood: { backgroundColor: '#43d16e' },
+  qualityFair: { backgroundColor: '#f5a623' },
+  qualityPoor: { backgroundColor: '#e53935' },
+  qualityInactive: { backgroundColor: 'rgba(255,255,255,0.2)' },
+
   pipContainer: {
     position: 'absolute',
     width: PIP_W,
     height: PIP_H,
     borderRadius: 14,
-    overflow: 'hidden',   // clips RTCView to rounded corners
+    overflow: 'hidden',
     borderWidth: 2,
     borderColor: '#fff',
     backgroundColor: '#1a1a1a',
@@ -848,7 +871,6 @@ const styles = StyleSheet.create({
   },
   pipPlaceholderText: { fontSize: 28 },
 
-  // Controls
   controls: {
     position: 'absolute',
     bottom: 0,
