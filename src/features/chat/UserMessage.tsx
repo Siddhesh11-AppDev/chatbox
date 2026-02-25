@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useState, useRef, useMemo } from 'react';
 import {
   View,
   Text,
@@ -26,6 +26,7 @@ import AppTextInput from '../../shared/components/AppTextInput';
 import { useAuth } from '../../core/context/AuthContext';
 import { chatService } from '../../core/services/chat.service';
 import { notificationService } from '../../core/services/notification.service';
+import { callHistoryService } from '../../core/services/callHistory.service';
 import firestore, {
   getDocs,
   query,
@@ -57,6 +58,21 @@ interface Message {
   deleted_for?: string[];
 }
 
+export interface CallHistoryItem {
+  id: string;
+  participants: string[];
+  callerId: string;
+  calleeId: string;
+  callerName: string;
+  calleeName: string;
+  callerAvatar?: string;
+  calleeAvatar?: string;
+  callType: 'audio' | 'video';
+  callStatus: 'missed' | 'received' | 'rejected' | 'completed' | 'outgoing';
+  duration?: number; // in seconds
+  timestamp: any;
+}
+
 const UserMessage = ({ route }: Props) => {
   const navigation =
     useNavigation<NativeStackScreenProps<AppStackParamList>['navigation']>();
@@ -68,6 +84,7 @@ const UserMessage = ({ route }: Props) => {
   const [isFocused, setIsFocused] = useState(false);
   const [hasCameraPermission, setHasCameraPermission] = useState(false);
   const [isSendingImage, setIsSendingImage] = useState(false);
+  const [callHistory, setCallHistory] = useState<CallHistoryItem[]>([]);
 
   // Voice recording states
   const [isRecording, setIsRecording] = useState(false);
@@ -100,6 +117,32 @@ const UserMessage = ({ route }: Props) => {
       Sound.removePlayBackListener();
     };
   }, []);
+
+  // Load call history - show only recent items
+  useEffect(() => {
+    if (!user) return;
+    
+    const loadCallHistory = async () => {
+      try {
+        // Load only the 5 most recent call history items to avoid clutter
+        const history = await callHistoryService.getCallHistory(user.uid, 5);
+        setCallHistory(history);
+      } catch (error) {
+        console.error('Error loading call history:', error);
+      }
+    };
+    
+    loadCallHistory();
+    
+    // Listen for real-time updates
+    const unsubscribe = callHistoryService.listenToCallHistory(user.uid, (newHistory) => {
+      // Only keep the 5 most recent items
+      const recentHistory = newHistory.slice(0, 5);
+      setCallHistory(recentHistory);
+    });
+    
+    return () => unsubscribe();
+  }, [user]);
 
   // ─── Pulse animation for recording dot ───────────────────────────────────────
   const startPulse = () => {
@@ -431,6 +474,9 @@ const UserMessage = ({ route }: Props) => {
       const callId = `call_${[user!.uid, userData.uid]
         .sort()
         .join('_')}_${Date.now()}`;
+      
+    
+      
       await notificationService.sendCallNotification({
         receiverId: userData.uid,
         callerId: user!.uid,
@@ -457,6 +503,9 @@ const UserMessage = ({ route }: Props) => {
       const callId = `call_${[user!.uid, userData.uid]
         .sort()
         .join('_')}_${Date.now()}`;
+      
+    
+      
       await notificationService.sendCallNotification({
         receiverId: userData.uid,
         callerId: user!.uid,
@@ -640,28 +689,167 @@ const UserMessage = ({ route }: Props) => {
     return `${m}:${s}`;
   };
 
+  // ─── Call History Helpers ──────────────────────────────────────────────────────
+  const getCallIcon = (callType: 'audio' | 'video', callStatus: string) => {
+    if (callStatus === 'missed') return 'phone-missed';
+    if (callStatus === 'rejected') return 'phone-missed';
+    if (callStatus === 'outgoing') {
+      return callType === 'audio' ? 'arrow-up-right' : 'arrow-up-right';
+    }
+    return callType === 'audio' ? 'phone' : 'video';
+  };
+
+  const getCallIconColor = (callStatus: string) => {
+    if (callStatus === 'missed' || callStatus === 'rejected') return '#FF3B30';
+    if (callStatus === 'outgoing') return '#34C759';
+    return '#34C759';
+  };
+
+  const formatCallTime = (timestamp: any) => {
+    if (!timestamp) return '';
+    let date: Date;
+    if (timestamp.toDate) date = timestamp.toDate();
+    else if (timestamp instanceof Date) date = timestamp;
+    else if (timestamp._seconds) date = new Date(timestamp._seconds * 1000);
+    else return '';
+    
+    return date.toLocaleTimeString([], {
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: true,
+    });
+  };
+
+  const formatCallDate = (timestamp: any) => {
+    if (!timestamp) return '';
+    let date: Date;
+    if (timestamp.toDate) date = timestamp.toDate();
+    else if (timestamp instanceof Date) date = timestamp;
+    else if (timestamp._seconds) date = new Date(timestamp._seconds * 1000);
+    else return '';
+    
+    const today = new Date();
+    const yesterday = new Date(today);
+    yesterday.setDate(yesterday.getDate() - 1);
+    
+    if (date.toDateString() === today.toDateString()) return 'Today';
+    if (date.toDateString() === yesterday.toDateString()) return 'Yesterday';
+    return date.toLocaleDateString([], { month: 'short', day: 'numeric' });
+  };
+
+  const getCallStatusText = (callStatus: string, callType: string) => {
+    if (callStatus === 'missed') return 'Missed call';
+    if (callStatus === 'rejected') return 'Rejected call';
+    if (callStatus === 'outgoing') return `Outgoing ${callType} call`;
+    if (callStatus === 'received') return `Incoming ${callType} call`;
+    return `${callType} call`;
+  };
+
+  const getChatCallStatusText = (callStatus: string, callType: string, isCurrentUserCaller: boolean) => {
+    if (callStatus === 'missed') return 'Missed call';
+    if (callStatus === 'rejected') return 'Rejected call';
+    if (callStatus === 'outgoing') return isCurrentUserCaller ? `Outgoing ${callType} call` : `Incoming ${callType} call`;
+    if (callStatus === 'received') return isCurrentUserCaller ? `Incoming ${callType} call` : `Outgoing ${callType} call`;
+    // For completed calls, determine from current user's perspective
+    return isCurrentUserCaller ? `Outgoing ${callType} call` : `Incoming ${callType} call`;
+  };
+
+  const handleCallHistoryItemPress = (callItem: CallHistoryItem) => {
+    // You can implement actions like calling back or viewing call details
+    console.log('Call history item pressed:', callItem);
+  };
+
+  const renderCallHistoryItem = (callItem: CallHistoryItem) => {
+    const isCurrentUserCaller = (user && callItem.callerId === user.uid) ?? false;
+    const otherUserName = isCurrentUserCaller ? callItem.calleeName : callItem.callerName;
+    const otherUserAvatar = isCurrentUserCaller ? callItem.calleeAvatar : callItem.callerAvatar;
+    
+    // Only show call history items that involve the current chat user
+    const involvesCurrentChatUser = 
+      (callItem.callerId === userData.uid || callItem.calleeId === userData.uid) &&
+      (callItem.callerId === user?.uid || callItem.calleeId === user?.uid);
+    
+    if (!involvesCurrentChatUser) {
+      return null; // Don't render call history items that don't involve this chat
+    }
+    
+    return (
+      <View style={styles.callHistoryCombinedBox}>
+        <Feather
+          name={getCallIcon(callItem.callType, callItem.callStatus)}
+          size={16}
+          color={getCallIconColor(callItem.callStatus)}
+        />
+        <Text style={styles.callHistoryCombinedText}>
+          {getChatCallStatusText(callItem.callStatus, callItem.callType, isCurrentUserCaller)}
+          {callItem.duration ? ` • ${formatAudioDuration(callItem.duration * 1000)}` : ''}
+        </Text>
+        <Text style={styles.callHistoryMessageTime}>
+          {formatCallTime(callItem.timestamp)}
+        </Text>
+      </View>
+    );
+  };
+
+  // Combine messages and recent call history for single integrated display
+  const getCombinedChatItems = () => {
+    // If no call history, just return messages
+    if (callHistory.length === 0) return messages;
+    
+    // Create a combined array with both messages and recent call history items
+    const combinedItems: (Message | CallHistoryItem)[] = [...messages];
+    
+    // Add call history items with a special type identifier for rendering
+    callHistory.forEach(call => {
+      combinedItems.push({
+        ...call,
+        isCallHistory: true,
+      } as Message & CallHistoryItem & { isCallHistory: true });
+    });
+    
+    // Sort by timestamp chronologically (oldest first)
+    combinedItems.sort((a: any, b: any) => {
+      const timeA = a.timestamp?.toDate?.() || a.timestamp || new Date(0);
+      const timeB = b.timestamp?.toDate?.() || b.timestamp || new Date(0);
+      return new Date(timeA).getTime() - new Date(timeB).getTime();
+    });
+    
+    return combinedItems;
+  };
+
+  // Cache combined messages and call history for better performance
+  const combinedChatItems = useMemo(() => getCombinedChatItems(), [messages, callHistory]);
+  
   // ─── Render message item ──────────────────────────────────────────────────────
-  const renderItem = ({ item, index }: { item: Message; index: number }) => {
+  const renderItem = ({ item, index }: { item: Message | (CallHistoryItem & { isCallHistory?: boolean }); index: number }) => {
+    // Handle call history items in the integrated display
+    if ('isCallHistory' in item && item.isCallHistory) {
+      const callItem = item as CallHistoryItem;
+      return renderCallHistoryItem(callItem);
+    }
+    
+    // Handle regular messages
+    const message = item as Message;
     // ✅ FIX 10: deleted_for now in interface — no more TS error
-    if (item.deleted_for && user && item.deleted_for.includes(user.uid)) {
+    if (message.deleted_for && user && message.deleted_for.includes(user.uid)) {
       return null;
     }
 
-    const isCurrentUser = user && item.senderId === user.uid;
-    const isSelected = selectedMessageId === item.id;
+    const isCurrentUser = user && message.senderId === user.uid;
+    const isSelected = selectedMessageId === message.id;
     const showDateSeparator =
       index === 0 ||
       (index > 0 &&
-        formatDate(messages[index - 1].timestamp) !==
-          formatDate(item.timestamp));
+        formatDate(combinedChatItems[index - 1].timestamp) !==
+          formatDate(message.timestamp));
 
-    const isImageMessage = item.type === 'image' && item.imageData;
-    const isAudioMessage = item.type === 'audio' && item.audioData;
-    const isDeleted = item.deleted === true;
+    const isImageMessage = message.type === 'image' && message.imageData;
+    const isAudioMessage = message.type === 'audio' && message.audioData;
+    const isDeleted = message.deleted === true;
 
-    const isPlaying = playingMessageId === item.id;
-    const position = playbackPosition[item.id!] || 0;
-    const durationMs = (item.audioDuration || 0) * 1000;
+    const isPlaying = playingMessageId === message.id;
+    const position = playbackPosition[message.id!] || 0;
+    const durationMs = (message.audioDuration || 0) * 1000;
     const progress = durationMs > 0 ? Math.min(position / durationMs, 1) : 0;
 
     return (
@@ -677,22 +865,6 @@ const UserMessage = ({ route }: Props) => {
               <Text style={styles.dateText}>{formatDate(item.timestamp)}</Text>
             </View>
           )}
-
-          {/* Action bar shown on long press */}
-          {/* {isSelected && (
-  <View
-    style={[
-      styles.actionBar,
-      isCurrentUser ? styles.actionBarRight : styles.actionBarLeft,
-    ]}>
-    <TouchableOpacity
-      style={styles.actionBarBtn}
-      onPress={() => item.id && handleDeleteMessage(item.id)}>
-      <MaterialIcons name="delete" size={16} color="#ff4444" />
-      <Text style={styles.actionBarText}>Delete</Text>
-    </TouchableOpacity>
-  </View>
-)} */}
 
           <View
             style={[
@@ -726,14 +898,14 @@ const UserMessage = ({ route }: Props) => {
                   </Text>
                 ) : isImageMessage ? (
                   <Image
-                    source={{ uri: `data:image/jpeg;base64,${item.imageData}` }}
+                    source={{ uri: `data:image/jpeg;base64,${message.imageData}` }}
                     style={styles.imageMessage}
                   />
                 ) : isAudioMessage ? (
                   /* ── Audio bubble ── */
                   <TouchableOpacity
                     style={styles.audioBubble}
-                    onPress={() => handlePlayAudio(item)}
+                    onPress={() => handlePlayAudio(message)}
                   >
                     <View
                       style={[
@@ -769,7 +941,7 @@ const UserMessage = ({ route }: Props) => {
                         {isPlaying
                           ? formatAudioDuration(position)
                           : formatAudioDuration(
-                              (item.audioDuration || 0) * 1000,
+                              (message.audioDuration || 0) * 1000,
                             )}
                       </Text>
                     </View>
@@ -787,7 +959,7 @@ const UserMessage = ({ route }: Props) => {
                       isCurrentUser && { color: '#fff' },
                     ]}
                   >
-                    {item.text}
+                    {message.text}
                   </Text>
                 )}
               </View>
@@ -798,7 +970,7 @@ const UserMessage = ({ route }: Props) => {
                   isCurrentUser ? styles.rightTimestamp : styles.leftTimestamp,
                 ]}
               >
-                {formatTime(item.timestamp)}
+                {formatTime(message.timestamp)}
               </Text>
             </View>
 
@@ -826,7 +998,10 @@ const UserMessage = ({ route }: Props) => {
 
         {/* Header */}
         <View style={styles.header}>
-          <TouchableOpacity onPress={() => navigation.goBack()}>
+          <TouchableOpacity onPress={() => {
+            // Navigate to the Tab navigator which contains the Messages screen
+            navigation.navigate('Tab');
+          }}>
             <Feather name="arrow-left" size={22} color="#000" />
           </TouchableOpacity>
 
@@ -841,7 +1016,7 @@ const UserMessage = ({ route }: Props) => {
             >
               <Text style={styles.headerName}>{userData.name}</Text>
               <Text style={styles.headerStatus}>
-                {userData.online ? 'Online' : 'Offline'}
+                {userData.online ?? false ? 'Online' : 'Offline'}
               </Text>
             </TouchableOpacity>
 
@@ -850,7 +1025,7 @@ const UserMessage = ({ route }: Props) => {
                 flexDirection: 'row',
                 alignItems: 'center',
                 flex: 1,
-                gap: 30,
+                gap: 20,
               }}
             >
               <TouchableOpacity onPress={handleVoiceCall}>
@@ -863,15 +1038,21 @@ const UserMessage = ({ route }: Props) => {
           </View>
         </View>
 
-        {/* Messages */}
+        {/* Single integrated display for messages and recent call history */}
         <FlatList
           ref={flatListRef}
-          data={messages}
-          keyExtractor={(item, index) => (item.id ? item.id : `msg-${index}`)}
+          data={combinedChatItems}
+          keyExtractor={(item, index) => (item.id ? item.id : `item-${index}`)}
           renderItem={renderItem}
           showsVerticalScrollIndicator={false}
           contentContainerStyle={styles.listContent}
           onTouchStart={() => setSelectedMessageId(null)}
+          onLayout={() => {
+            // Scroll to bottom to show latest messages
+            setTimeout(() => {
+              flatListRef.current?.scrollToEnd({ animated: false });
+            }, 100);
+          }}
         />
 
         {/* INPUT BAR */}
@@ -1195,5 +1376,79 @@ const styles = StyleSheet.create({
     backgroundColor: '#18b3a4',
     justifyContent: 'center',
     alignItems: 'center',
+  },
+
+  // Integrated Call History Message Styles
+  callHistoryMessageAvatarContainer: {
+    width: 32,
+    height: 32,
+    marginRight: 8,
+  },
+  callHistoryMessageAvatar: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+  },
+  callHistoryMessageAvatarPlaceholder: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#000',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  callHistoryMessageAvatarText: {
+    fontSize: 14,
+    color: '#fff',
+    fontWeight: '600',
+  },
+  callHistoryMessageInfo: {
+    flex: 1,
+  },
+  callHistoryMessageName: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#000',
+  },
+  callHistoryMessageSubRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 2,
+  },
+  callHistoryMessageStatus: {
+    fontSize: 12,
+    color: '#666',
+    marginLeft: 6,
+  },
+  callHistoryMessageTime: {
+    fontSize: 11,
+    color: '#888',
+    marginLeft: 8,
+  },
+  
+  // Combined call history box styles
+  callHistoryCombinedBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#e8f4f8',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderRadius: 20,
+    alignSelf: 'center',
+    maxWidth: '85%',
+    minWidth: 260,
+    elevation: 2,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.1,
+    shadowRadius: 2,
+    marginBottom:10
+  },
+  callHistoryCombinedText: {
+    fontSize: 15,
+    color: '#333',
+    marginLeft: 10,
+    fontWeight: '500',
+    flex: 1,
   },
 });

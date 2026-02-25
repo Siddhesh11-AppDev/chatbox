@@ -23,6 +23,7 @@ import { useAuth } from '../../core/context/AuthContext';
 import firestore from '@react-native-firebase/firestore';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { notificationService } from '../../core/services/notification.service';
+import { callHistoryService } from '../../core/services/callHistory.service';
 
 let InCallManager: any = null;
 try {
@@ -447,6 +448,36 @@ const VoiceCall = () => {
     if (localStreamRef.current) {
       localStreamRef.current.getTracks().forEach(t => t.stop());
       localStreamRef.current = null;
+    }
+
+    // Save call record
+    try {
+      const callStatus = connectionStateRef.current;
+      let callRecordStatus: 'missed' | 'received' | 'rejected' | 'completed' | 'outgoing' = 'completed';
+      
+      if (callStatus === 'closed' || callStatus === 'disconnected') {
+        callRecordStatus = callDuration > 0 ? 'completed' : 'missed';
+      } else if (callStatus === 'failed') {
+        callRecordStatus = 'rejected';
+      }
+      
+      // Save call record to history
+      if (user && userData) {
+        await callHistoryService.saveCallRecord({
+          participants: [user.uid, userData.uid],
+          callerId: isCallerRef.current ? user.uid : userData.uid,
+          calleeId: isCallerRef.current ? userData.uid : user.uid,
+          callerName: isCallerRef.current ? (user?.displayName || user?.email || 'User') : userData.name,
+          calleeName: isCallerRef.current ? userData.name : (user?.displayName || user?.email || 'User'),
+          callerAvatar: isCallerRef.current ? userProfile?.profile_image : userData.profile_image,
+          calleeAvatar: isCallerRef.current ? userData.profile_image : userProfile?.profile_image,
+          callType: 'audio',
+          callStatus: callRecordStatus,
+          duration: callDuration,
+        });
+      }
+    } catch (error) {
+      console.error('Error saving call record:', error);
     }
 
     try {
