@@ -15,6 +15,7 @@ import { useNavigation, useRoute } from '@react-navigation/native';
 import { useAuth } from '../../core/context/AuthContext';
 import firestore from '@react-native-firebase/firestore';
 import { notificationService } from '../../core/services/notification.service';
+import { callHistoryService } from '../../core/services/callHistory.service';
 import Feather from 'react-native-vector-icons/Feather';
 
 let InCallManager: any = null;
@@ -31,7 +32,7 @@ const VIBRATION_PATTERN = [0, 400, 200, 400, 200, 400];
 const IncomingCallScreen = () => {
   const navigation = useNavigation<any>();
   const route = useRoute();
-  const { user } = useAuth();
+  const { user, userProfile } = useAuth();
 
   const {
     callId,
@@ -89,7 +90,7 @@ const IncomingCallScreen = () => {
     timerRef.current = setInterval(() => {
       setTimeLeft(t => {
         if (t <= 1) {
-          rejectCall();
+          rejectCall('missed'); // auto-decline = missed, not a deliberate reject
           return 0;
         }
         return t - 1;
@@ -162,9 +163,38 @@ const IncomingCallScreen = () => {
   };
 
   // ─────────────────────────────────────────────────────────────────────────
+  //  SAVE CALLEE RECORD
+  //  The caller's record is saved in VideoCall / VoiceCall doCleanup().
+  //  The callee must save their own record here because they never enter the
+  //  call screen when they decline or miss the call (no doCleanup() runs).
+  // ─────────────────────────────────────────────────────────────────────────
+  const saveCalleeRecord = async (status: 'missed' | 'rejected') => {
+    if (!user) return;
+    try {
+      const calleeName =
+        userProfile?.name || user.displayName || user.email || 'User';
+      await callHistoryService.saveCallRecord({
+        ownerId: user.uid,
+        participants: [callerId, user.uid],
+        callerId,
+        calleeId: user.uid,
+        callerName,
+        calleeName,
+        callerAvatar: avatar,
+        calleeAvatar: userProfile?.profile_image ?? undefined,
+        callType: type,
+        callStatus: status,
+        duration: 0,
+      });
+    } catch (err) {
+      console.error('[IncomingCall] Failed to save callee record:', err);
+    }
+  };
+
+  // ─────────────────────────────────────────────────────────────────────────
   //  REJECT
   // ─────────────────────────────────────────────────────────────────────────
-  const rejectCall = async () => {
+  const rejectCall = async (calleeStatus: 'missed' | 'rejected' = 'rejected') => {
     if (handledRef.current) return;
     handledRef.current = true;
 
@@ -182,7 +212,10 @@ const IncomingCallScreen = () => {
           endedAt: firestore.FieldValue.serverTimestamp(),
         });
 
-      // Notify caller of missed call
+      // Save callee's own history record
+      await saveCalleeRecord(calleeStatus);
+
+      // Notify caller
       const callSnap = await firestore().collection('calls').doc(callId).get();
       const data = callSnap.data();
       const initiator = data?.callerId ?? data?.initiatedBy;
@@ -255,7 +288,7 @@ const IncomingCallScreen = () => {
         <View style={styles.actionItem}>
           <TouchableOpacity
             style={[styles.actionBtn, styles.declineBtn]}
-            onPress={rejectCall}
+           onPress={rejectCall}
             activeOpacity={0.8}
             disabled={accepting}
           >

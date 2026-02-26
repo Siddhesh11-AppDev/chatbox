@@ -28,6 +28,7 @@ import firestore from '@react-native-firebase/firestore';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { notificationService } from '../../core/services/notification.service';
 import { callHistoryService } from '../../core/services/callHistory.service';
+import { CallHistoryItem } from '../chat/UserMessage';
 
 let InCallManager: any = null;
 try {
@@ -109,6 +110,15 @@ const VideoCall = () => {
   const connectionStateRef = useRef<ConnectionState>('initializing');
   const speakingTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const speakingPulse = useRef(new Animated.Value(1)).current;
+
+  // ── Call-history tracking refs ────────────────────────────────────────────
+  // callWasAnsweredRef: true only when Firestore status becomes 'answered'.
+  // This is the only reliable signal — WebRTC ICE states alone cannot
+  // distinguish "never answered" from "answered then disconnected".
+  const callWasAnsweredRef = useRef(false);
+  // Mirror callDuration state into a ref so doCleanup() always reads the
+  // latest value even when called from a cleanup closure with stale state.
+  const callDurationRef = useRef(0);
 
   const pipX = useRef(new Animated.Value(PIP_INIT_X)).current;
   const pipY = useRef(new Animated.Value(PIP_INIT_Y)).current;
@@ -324,6 +334,7 @@ const VideoCall = () => {
               const status = doc.data()?.status;
 
               if (status === 'answered') {
+                callWasAnsweredRef.current = true; // ← definitive "call connected" signal
                 if (callTimeoutRef.current) {
                   clearTimeout(callTimeoutRef.current);
                   callTimeoutRef.current = null;
@@ -391,10 +402,13 @@ const VideoCall = () => {
 
   useEffect(() => {
     if (connectionState === 'connected') {
-      callTimerRef.current = setInterval(
-        () => setCallDuration(d => d + 1),
-        1000,
-      );
+      callTimerRef.current = setInterval(() => {
+        setCallDuration(d => {
+          const next = d + 1;
+          callDurationRef.current = next; // keep ref in sync for doCleanup
+          return next;
+        });
+      }, 1000);
     } else {
       if (callTimerRef.current) {
         clearInterval(callTimerRef.current);
@@ -478,30 +492,47 @@ const VideoCall = () => {
       localStreamRef.current = null;
     }
 
-    // Save call record
+    // ── Save this user's call history record ──────────────────────────────
+    //
+    // Status decision tree (mirrors WhatsApp behaviour):
+    //
+    //  CALLER perspective (isCallerRef.current === true):
+    //    callWasAnswered=true  →  'outgoing'   (call went through)
+    //    callWasAnswered=false →  'missed'     (no answer / declined — same from caller's POV)
+    //
+    //  CALLEE perspective (isCallerRef.current === false):
+    //    callWasAnswered=true  →  'received'   (they picked up)
+    //    callWasAnswered=false →  'missed'     (caller hung up before they could answer)
+    //
+    //  NOTE: If the callee actively tapped Decline in IncomingCallScreen, the
+    //  callee's record is saved there (with status='rejected') and
+    //  callWasAnsweredRef stays false here, so the caller sees 'missed'. ✓
+    //
+    //  Each side stores its OWN record with ownerId=user.uid so the Firestore
+    //  query (`ownerId == userId`) returns exactly one record per call.
     try {
-      const callStatus = connectionStateRef.current;
-      let callRecordStatus: 'missed' | 'received' | 'rejected' | 'completed' | 'outgoing' = 'completed';
-      
-      if (callStatus === 'closed' || callStatus === 'disconnected') {
-        callRecordStatus = callDuration > 0 ? 'completed' : 'missed';
-      } else if (callStatus === 'failed') {
-        callRecordStatus = 'rejected';
-      }
-      
-      // Save call record to history
       if (user && userData) {
+        const isCaller = isCallerRef.current;
+        const answered = callWasAnsweredRef.current;
+        const duration = callDurationRef.current;
+        const myName = userProfile?.name || user?.displayName || user?.email || 'User';
+
+        const callRecordStatus: CallHistoryItem['callStatus'] = isCaller
+          ? answered ? 'outgoing' : 'missed'
+          : answered ? 'received' : 'missed';
+
         await callHistoryService.saveCallRecord({
+          ownerId: user.uid,
           participants: [user.uid, userData.uid],
-          callerId: isCallerRef.current ? user.uid : userData.uid,
-          calleeId: isCallerRef.current ? userData.uid : user.uid,
-          callerName: isCallerRef.current ? (user?.displayName || user?.email || 'User') : userData.name,
-          calleeName: isCallerRef.current ? userData.name : (user?.displayName || user?.email || 'User'),
-          callerAvatar: isCallerRef.current ? userProfile?.profile_image : userData.profile_image,
-          calleeAvatar: isCallerRef.current ? userData.profile_image : userProfile?.profile_image,
+          callerId: isCaller ? user.uid : userData.uid,
+          calleeId: isCaller ? userData.uid : user.uid,
+          callerName: isCaller ? myName : userData.name,
+          calleeName: isCaller ? userData.name : myName,
+          callerAvatar: isCaller ? userProfile?.profile_image : userData.profile_image,
+          calleeAvatar: isCaller ? userData.profile_image : userProfile?.profile_image,
           callType: 'video',
           callStatus: callRecordStatus,
-          duration: callDuration,
+          duration,
         });
       }
     } catch (error) {

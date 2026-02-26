@@ -2,57 +2,56 @@ import firestore from '@react-native-firebase/firestore';
 import { notificationService } from './notification.service';
 
 /**
- * Helper function to initiate a call
- * @param callerId - The ID of the user initiating the call
- * @param receiverId - The ID of the user receiving the call
- * @param callType - Type of call ('audio' or 'video')
- * @param callerName - Name of the caller
- * @param callerAvatar - Avatar URL of the caller (optional)
- * @returns Promise<string> - The call ID
+ * Initialise a new call document in Firestore and push a notification to the
+ * receiver.  Returns the generated callId.
+ *
+ * HISTORY NOTE: This helper only creates the *signalling* document.
+ * Call-history records are written by:
+ *   • VideoCall / VoiceCall doCleanup() — for both caller (outgoing/missed)
+ *     and callee (received/missed) when they were inside the call screen.
+ *   • IncomingCallScreen.rejectCall() — for the callee when they decline or
+ *     the call auto-expires before they enter the call screen.
+ *
+ * Do NOT save call-history records here; this function runs before the call
+ * outcome is known.
  */
 export async function initiateCall(
   callerId: string,
   receiverId: string,
   callType: 'audio' | 'video',
   callerName: string,
-  callerAvatar?: string
+  callerAvatar?: string,
 ): Promise<string> {
   try {
-    // Create a new call document
     const callId = `call_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     const callRef = firestore().collection('calls').doc(callId);
-    
-    // Create the call document with initial data
+
     await callRef.set({
-      callId: callId,
-      callerId: callerId,
-      receiverId: receiverId,
-      callType: callType,
-      status: 'waiting', // Initial status
+      callId,
+      callerId,
+      receiverId,
+      callType,
+      status: 'waiting',
       createdAt: firestore.FieldValue.serverTimestamp(),
+      // `participants` here is a map (keyed by UID) used for WebRTC signalling
+      // state. It is SEPARATE from the `participants` array stored on
+      // callHistory documents.
       participants: {
-        [callerId]: {
-          connectionState: 'initializing',
-          lastPing: firestore.FieldValue.serverTimestamp(),
-        },
-        [receiverId]: {
-          connectionState: 'waiting',
-          lastPing: null,
-        },
+        [callerId]:   { connectionState: 'initializing', lastPing: firestore.FieldValue.serverTimestamp() },
+        [receiverId]: { connectionState: 'waiting',      lastPing: null },
       },
     });
 
-    // Send notification to receiver
     await notificationService.sendCallNotification({
-      receiverId: receiverId,
-      callerId: callerId,
-      callerName: callerName,
-      callerAvatar: callerAvatar,
-      callId: callId,
-      callType: callType,
+      receiverId,
+      callerId,
+      callerName,
+      callerAvatar,
+      callId,
+      callType,
     });
 
-    console.log(`Call initiated: ${callId} (${callType}) from ${callerId} to ${receiverId}`);
+    console.log(`📞 Call initiated: ${callId} (${callType}) ${callerId} → ${receiverId}`);
     return callId;
   } catch (error) {
     console.error('Error initiating call:', error);

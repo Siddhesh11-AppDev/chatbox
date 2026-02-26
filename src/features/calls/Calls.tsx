@@ -1,18 +1,17 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   View,
   Text,
   StyleSheet,
   FlatList,
+  SectionList,
   Image,
   TouchableOpacity,
   Alert,
   KeyboardAvoidingView,
-  Keyboard,
   Platform,
 } from 'react-native';
 import Feather from 'react-native-vector-icons/Feather';
-
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAuth } from '../../core/context/AuthContext';
 import { callHistoryService } from '../../core/services/callHistory.service';
@@ -26,263 +25,330 @@ type CallsNavigationProp = NativeStackNavigationProp<
   'userMsg'
 >;
 
+// ─── Status display helpers ───────────────────────────────────────────────────
+//
+//  With the new ownerId architecture, each record already encodes the viewer's
+//  perspective via callStatus. We only fall back to isCaller derivation for
+//  legacy 'completed' records saved before the migration.
+//
+//  Status meanings:
+//    'outgoing'  → viewer placed the call, it connected
+//    'received'  → viewer received the call, it connected
+//    'missed'    → caller: no answer / callee: missed incoming call
+//    'rejected'  → callee deliberately tapped Decline
+//    'completed' → legacy — direction inferred from callerId vs currentUser
+//
+// ─────────────────────────────────────────────────────────────────────────────
+
+const GREEN = '#25D366';
+const RED = '#FF3B30';
+const GREY = '#8E8E93';
+
+type StatusDisplay = { icon: string; color: string; label: string };
+
+function getStatusDisplay(
+  item: CallHistoryItem,
+  currentUserId: string | undefined,
+): StatusDisplay {
+  const t = item.callType === 'video' ? 'video' : 'voice';
+  const isCaller = item.callerId === currentUserId;
+
+  switch (item.callStatus) {
+    case 'outgoing':
+      return {
+        icon: 'arrow-up-right',
+        color: GREEN,
+        label: `Outgoing ${t} call`,
+      };
+
+    case 'received':
+      return {
+        icon: 'arrow-down-left',
+        color: GREEN,
+        label: `Incoming ${t} call`,
+      };
+
+    case 'missed':
+      // isCaller=true  → they placed the call, other side never answered
+      // isCaller=false → they received the call, caller hung up before they saw it
+      return isCaller
+        ? { icon: 'phone-missed', color: RED, label: `Missed ${t} call` }
+        : { icon: 'phone-missed', color: RED, label: `Missed ${t} call` };
+
+    case 'rejected':
+      // Callee deliberately tapped Decline. From their own history it still
+      // reads "Missed call" — same as WhatsApp.
+      return { icon: 'phone-missed', color: RED, label: `Missed ${t} call` };
+
+    // Legacy fallback for pre-migration 'completed' records
+    case 'completed':
+      return isCaller
+        ? { icon: 'arrow-up-right', color: GREEN, label: `Outgoing ${t} call` }
+        : {
+            icon: 'arrow-down-left',
+            color: GREEN,
+            label: `Incoming ${t} call`,
+          };
+
+    default:
+      return {
+        icon: item.callType === 'video' ? 'video' : 'phone',
+        color: GREY,
+        label: `${t} call`,
+      };
+  }
+}
+
+const isMissed = (s: CallHistoryItem['callStatus']) =>
+  s === 'missed' || s === 'rejected';
+
+// ─── Timestamp helpers ────────────────────────────────────────────────────────
+
+function toDate(ts: any): Date | null {
+  if (!ts) return null;
+  if (ts.toDate) return ts.toDate();
+  if (ts instanceof Date) return ts;
+  if (ts._seconds) return new Date(ts._seconds * 1000);
+  return null;
+}
+
+function fmtTime(ts: any): string {
+  const d = toDate(ts);
+  if (!d) return '';
+  return d.toLocaleTimeString([], {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: true,
+  });
+}
+
+function fmtDuration(secs: number): string {
+  return `${Math.floor(secs / 60)}:${(secs % 60).toString().padStart(2, '0')}`;
+}
+
+/**
+ * Maps a Firestore timestamp to a human-readable section heading,
+ * exactly like WhatsApp:
+ *   same day      → "Today"
+ *   yesterday     → "Yesterday"
+ *   ≤7 days ago   → weekday name ("Tuesday")
+ *   older         → "12 Jan 2025"
+ */
+function sectionKey(ts: any): string {
+  const d = toDate(ts);
+  if (!d) return 'Unknown';
+  const today = new Date();
+  const days = Math.floor((today.getTime() - d.getTime()) / 86_400_000);
+
+  if (days === 0) return 'Today';
+  if (days === 1) return 'Yesterday';
+  if (days < 7) return d.toLocaleDateString([], { weekday: 'long' });
+  return d.toLocaleDateString([], {
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric',
+  });
+}
+
+/**
+ * Sorts section keys newest-first:
+ *   Today > Yesterday > weekday names (by distance) > formatted dates (desc)
+ *
+ * The original code had `return 0` for non-Today/Yesterday keys, which left
+ * older dates in arbitrary insertion order. This version sorts them properly.
+ */
+function sortKeys(keys: string[]): string[] {
+  const FIXED: Record<string, number> = {
+    Today: 0,
+    Yesterday: 1,
+    // Weekday names are 2–8; we keep them as-is and resolve below
+  };
+  const WEEKDAYS = [
+    'Monday',
+    'Tuesday',
+    'Wednesday',
+    'Thursday',
+    'Friday',
+    'Saturday',
+    'Sunday',
+  ];
+
+  return [...keys].sort((a, b) => {
+    // Fixed labels first
+    const oa = FIXED[a];
+    const ob = FIXED[b];
+    if (oa !== undefined && ob !== undefined) return oa - ob;
+    if (oa !== undefined) return -1;
+    if (ob !== undefined) return 1;
+
+    // Weekday names second (closer day = smaller index = first)
+    const wa = WEEKDAYS.indexOf(a);
+    const wb = WEEKDAYS.indexOf(b);
+    if (wa !== -1 && wb !== -1) return wa - wb;
+    if (wa !== -1) return -1;
+    if (wb !== -1) return 1;
+
+    // Formatted date strings last, sorted descending (newer first)
+    const da = new Date(a);
+    const db = new Date(b);
+    if (!isNaN(da.getTime()) && !isNaN(db.getTime()))
+      return db.getTime() - da.getTime();
+    return a.localeCompare(b);
+  });
+}
+
+// ─── Main component ───────────────────────────────────────────────────────────
+
 export default function Calls() {
   const navigation = useNavigation<CallsNavigationProp>();
   const { user } = useAuth();
-  const [callHistory, setCallHistory] = useState<CallHistoryItem[]>([]);
+  const [calls, setCalls] = useState<CallHistoryItem[]>([]);
   const [showHistory, setShowHistory] = useState(false);
 
-  // Load call history
   useEffect(() => {
     if (!user) return;
-
-    const loadCallHistory = async () => {
-      try {
-        const history = await callHistoryService.getCallHistory(user.uid, 30);
-        setCallHistory(history);
-      } catch (error) {
-        console.error('Error loading call history:', error);
-      }
-    };
-
-    loadCallHistory();
-
-    // Listen for real-time updates
-    const unsubscribe = callHistoryService.listenToCallHistory(
-      user.uid,
-      setCallHistory,
-    );
-
-    return () => unsubscribe();
+    // Initial load + real-time subscription
+    callHistoryService
+      .getCallHistory(user.uid, 30)
+      .then(setCalls)
+      .catch(console.error);
+    return callHistoryService.listenToCallHistory(user.uid, setCalls);
   }, [user]);
 
-  // Call History Helpers
-  const getCallIcon = (callType: 'audio' | 'video', callStatus: string, isCurrentUserCaller?: boolean) => {
-    if (callStatus === 'missed') return 'phone-missed';
-    if (callStatus === 'rejected') return 'phone-missed';
-    if (callStatus === 'outgoing' || (callStatus === 'completed' && isCurrentUserCaller === true)) {
-      return callType === 'audio' ? 'arrow-up-right' : 'arrow-up-right';
-    }
-    if (callStatus === 'received' || (callStatus === 'completed' && (isCurrentUserCaller === false || isCurrentUserCaller === undefined))) {
-      return callType === 'audio' ? 'arrow-down-left' : 'arrow-down-left';
-    }
-    return callType === 'audio' ? 'phone' : 'video';
-  };
+  // ── Handlers ──────────────────────────────────────────────────────────────
 
-  const getCallIconColor = (callStatus: string, isCurrentUserCaller?: boolean) => {
-    if (callStatus === 'missed' || callStatus === 'rejected') return '#FF3B30';
-    if (callStatus === 'outgoing' || (callStatus === 'completed' && isCurrentUserCaller === true)) return '#34C759';
-    return '#34C759';
-  };
-
-  const formatCallTime = (timestamp: any) => {
-    if (!timestamp) return '';
-    let date: Date;
-    if (timestamp.toDate) date = timestamp.toDate();
-    else if (timestamp instanceof Date) date = timestamp;
-    else if (timestamp._seconds) date = new Date(timestamp._seconds * 1000);
-    else return '';
-
-    return date.toLocaleTimeString([], {
-      hour: '2-digit',
-      minute: '2-digit',
-      hour12: true,
-    });
-  };
-
-  const formatCallDate = (timestamp: any) => {
-    if (!timestamp) return '';
-    let date: Date;
-    if (timestamp.toDate) date = timestamp.toDate();
-    else if (timestamp instanceof Date) date = timestamp;
-    else if (timestamp._seconds) date = new Date(timestamp._seconds * 1000);
-    else return '';
-
-    const today = new Date();
-    const yesterday = new Date(today);
-    yesterday.setDate(yesterday.getDate() - 1);
-
-    if (date.toDateString() === today.toDateString()) return 'Today';
-    if (date.toDateString() === yesterday.toDateString()) return 'Yesterday';
-    return date.toLocaleDateString([], { month: 'short', day: 'numeric' });
-  };
-
-  const getCallStatusText = (callStatus: string, callType: string, isCurrentUserCaller?: boolean) => {
-    if (callStatus === 'missed') return 'Missed call';
-    if (callStatus === 'rejected') return 'Rejected call';
-    if (callStatus === 'outgoing' || (callStatus === 'completed' && isCurrentUserCaller === true)) return `Outgoing ${callType} call`;
-    if (callStatus === 'received' || (callStatus === 'completed' && (isCurrentUserCaller === false || isCurrentUserCaller === undefined))) return `Incoming ${callType} call`;
-    return `${callType} call`;
-  };
-
-  const formatDuration = (seconds: number) => {
-    const mins = Math.floor(seconds / 60);
-    const secs = seconds % 60;
-    return `${mins.toString().padStart(2, '0')}:${secs
-      .toString()
-      .padStart(2, '0')}`;
-  };
-
-  const handleCallHistoryItemPress = (callItem: CallHistoryItem) => {
-    // Navigate to chat with this user
-    const otherUserId =
-      callItem.callerId === user?.uid ? callItem.calleeId : callItem.callerId;
-    const otherUserName =
-      callItem.callerId === user?.uid
-        ? callItem.calleeName
-        : callItem.callerName;
-    const otherUserAvatar =
-      callItem.callerId === user?.uid
-        ? callItem.calleeAvatar
-        : callItem.callerAvatar;
-
-    const userData = {
-      uid: otherUserId,
-      name: otherUserName,
-      profile_image: otherUserAvatar,
-    };
-
-    navigation.navigate('userMsg', { userData });
-  };
-
-  const handleDeleteCall = (callId: string) => {
-    Alert.alert(
-      'Delete Call',
-      'Are you sure you want to delete this call record?',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Delete',
-          style: 'destructive',
-          onPress: async () => {
-            try {
-              await callHistoryService.deleteCallRecord(callId);
-            } catch (error) {
-              Alert.alert('Error', 'Failed to delete call record');
-            }
-          },
+  const openChat = useCallback(
+    (item: CallHistoryItem) => {
+      const isCaller = item.callerId === user?.uid;
+      navigation.navigate('userMsg', {
+        userData: {
+          uid: isCaller ? item.calleeId : item.callerId,
+          name: isCaller ? item.calleeName : item.callerName,
+          profile_image: isCaller ? item.calleeAvatar : item.callerAvatar,
         },
-      ],
-    );
-  };
+      });
+    },
+    [user, navigation],
+  );
 
-  const renderCallHistoryItem = ({ item }: { item: CallHistoryItem }) => {
-    const isCurrentUserCaller = user ? item.callerId === user.uid : undefined;
-    const otherUserName = isCurrentUserCaller
-      ? item.calleeName
-      : item.callerName;
-    const otherUserAvatar = isCurrentUserCaller
-      ? item.calleeAvatar
-      : item.callerAvatar;
 
-    return (
-      <TouchableOpacity
-        style={styles.callHistoryRow}
-        onPress={() => handleCallHistoryItemPress(item)}
-        onLongPress={() => handleDeleteCall(item.id)}
-      >
-        <View style={styles.callHistoryAvatarContainer}>
-          {otherUserAvatar ? (
-            <Image source={{ uri: otherUserAvatar }} style={styles.callHistoryAvatar} />
-          ) : (
-            <View style={styles.callHistoryAvatarPlaceholder}>
-              <Text style={styles.callHistoryAvatarText}>
-                {otherUserName.charAt(0).toUpperCase()}
+const confirmDelete = useCallback(async (callId: string) => {
+  Alert.alert('Delete record', 'Remove this call from your history?', [
+    { text: 'Cancel', style: 'cancel' },
+    {
+      text: 'Delete',
+      style: 'destructive',
+      onPress: async () => {
+        try {
+          await callHistoryService.deleteCallRecord(callId);
+          // The real-time listener will automatically update the UI
+          console.log('Call record deletion initiated for ID:', callId);
+        } catch (error) {
+          console.error('Failed to delete call record:', error);
+          Alert.alert('Error', 'Failed to delete call record. Please try again.');
+        }
+      },
+    },
+  ]);
+}, []);
+
+  // ── Row renderer (memoised per uid to avoid re-renders) ───────────────────
+
+  const renderRow = useCallback(
+    ({ item }: { item: CallHistoryItem }) => {
+      const isCaller = item.callerId === user?.uid;
+      const name = isCaller ? item.calleeName : item.callerName;
+      const avatar = isCaller ? item.calleeAvatar : item.callerAvatar;
+      const display = getStatusDisplay(item, user?.uid);
+      const missed = isMissed(item.callStatus);
+
+      return (
+        <TouchableOpacity
+          style={styles.row}
+          onPress={() => openChat(item)}
+          onLongPress={() => confirmDelete(item.id)}
+          activeOpacity={0.65}
+        >
+          {/* Avatar + call-type pip */}
+          <View style={styles.avatarWrap}>
+            
+              <View style={styles.avatarFallback}>
+                <Text style={styles.avatarInitial}>
+                  {(name ?? '?')[0].toUpperCase()}
+                </Text>
+              </View>
+           
+            <View style={[styles.typePip, missed && styles.typePipMissed]}>
+              <Feather
+                name={item.callType === 'video' ? 'video' : 'phone'}
+                size={9}
+                color="#fff"
+              />
+            </View>
+          </View>
+
+          {/* Name + status label */}
+          <View style={styles.info}>
+            <Text
+              style={[styles.name, missed && styles.nameMissed]}
+              numberOfLines={1}
+            >
+              {name}
+            </Text>
+            <View style={styles.subRow}>
+               {/* <View style={[styles.typePip, missed && styles.typePipMissed]}>
+              <Feather
+                name={item.callType === 'video' ? 'video' : 'phone'}
+                size={9}
+                color="#fff"
+              />
+            </View> */}
+              <Text
+                style={[styles.subText, missed && styles.subTextMissed]}
+                numberOfLines={1}
+              >
+                {'  '}
+                {display.label}
+                {item.duration ? `  ·  ${fmtDuration(item.duration)}` : ''}
               </Text>
             </View>
-          )}
-        </View>
+          </View>
 
-        <View style={styles.callHistoryInfo}>
-          <Text style={styles.callHistoryName}>{otherUserName}</Text>
-          <View style={styles.callHistorySubRow}>
-            <Feather
-              name={getCallIcon(item.callType, item.callStatus, isCurrentUserCaller)}
-              size={14}
-              color={getCallIconColor(item.callStatus, isCurrentUserCaller)}
-            />
-            <Text style={styles.callHistoryStatus}>
-              {getCallStatusText(item.callStatus, item.callType, isCurrentUserCaller)}
-              {item.duration ? ` • ${formatDuration(item.duration)}` : ''}
+          {/* Time + info tap target */}
+          <View style={styles.rightCol}>
+            <Text style={[styles.time, missed && styles.timeMissed]}>
+              {fmtTime(item.timestamp)}
             </Text>
+            {/* <TouchableOpacity
+              onPress={() => confirmDelete(item.id)}
+              hitSlop={{ top: 8, bottom: 8, left: 12, right: 0 }}
+            >
+              <Feather name="trash-2" size={17} color="rgb(212, 9, 9)" />
+            </TouchableOpacity> */}
           </View>
-        </View>
-
-        <View style={styles.callHistoryActions}>
-          <Text style={styles.callHistoryTime}>
-            {formatCallTime(item.timestamp)}
-          </Text>
-          <TouchableOpacity
-            style={styles.callHistoryActionBtn}
-            onPress={() => handleDeleteCall(item.id)}
-          >
-            <Feather name="trash-2" size={16} color="#888" />
-          </TouchableOpacity>
-        </View>
-      </TouchableOpacity>
-    );
-  };
-
-  const renderCallHistory = () => {
-    if (!showHistory || callHistory.length === 0) {
-      return (
-        <View style={styles.emptyHistory}>
-          <Feather name="phone-off" size={48} color="#ccc" />
-          <Text style={styles.emptyHistoryText}>No call history yet</Text>
-          <Text style={styles.emptyHistorySubtext}>
-            Your call records will appear here
-          </Text>
-        </View>
+        </TouchableOpacity>
       );
-    }
+    },
+    [user, openChat, confirmDelete],
+  );
 
-    // Group calls by date
-    const groupedCalls: Record<string, CallHistoryItem[]> = {};
-    callHistory.forEach(call => {
-      const dateKey = formatCallDate(call.timestamp);
-      if (!groupedCalls[dateKey]) {
-        groupedCalls[dateKey] = [];
-      }
-      groupedCalls[dateKey].push(call);
+  // ── Sections for history view ──────────────────────────────────────────────
+
+  const sections = useMemo(() => {
+    const grouped: Record<string, CallHistoryItem[]> = {};
+    calls.forEach(c => {
+      const key = sectionKey(c.timestamp);
+      (grouped[key] = grouped[key] ?? []).push(c);
     });
+    return sortKeys(Object.keys(grouped)).map(title => ({
+      title,
+      data: grouped[title],
+    }));
+  }, [calls]);
 
-    const sortedDates = Object.keys(groupedCalls).sort((a, b) => {
-      if (a === 'Today') return -1;
-      if (b === 'Today') return 1;
-      if (a === 'Yesterday') return -1;
-      if (b === 'Yesterday') return 1;
-      return 0;
-    });
+  const recentCalls = useMemo(() => calls.slice(0, 10), [calls]);
 
-    return (
-      <View style={styles.callHistoryContainer}>
-        {sortedDates.map(date => (
-          <View key={date}>
-            <Text style={styles.callHistoryDateHeader}>{date}</Text>
-            {groupedCalls[date].map(call => (
-              <View key={call.id}>{renderCallHistoryItem({ item: call })}</View>
-            ))}
-          </View>
-        ))}
-      </View>
-    );
-  };
-
-  const renderCallsList = () => {
-    if (showHistory) return null;
-
-    // Show the first 10 recent calls from the call history
-    const recentCalls = callHistory.slice(0, 10);
-
-    return (
-      <FlatList
-        data={recentCalls}
-        keyExtractor={item => item.id}
-        renderItem={({ item }) => renderCallHistoryItem({ item })}
-        showsVerticalScrollIndicator={false}
-      />
-    );
-  };
+  // ── Render ─────────────────────────────────────────────────────────────────
 
   return (
     <SafeAreaView style={styles.container}>
@@ -290,32 +356,79 @@ export default function Calls() {
         style={{ flex: 1 }}
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
       >
-        {/* Header */}
-        <View style={styles.fixedHeader}>
-          <TouchableOpacity style={styles.searchIcon}>
-            <Feather name="search" size={22} color="#FFF" />
+        {/* ── App bar ──────────────────────────────────────────────────── */}
+        <View style={styles.appBar}>
+          <TouchableOpacity style={styles.iconBtn} activeOpacity={0.7}>
+            <Feather name="search" size={19} color="#fff" />
           </TouchableOpacity>
 
-          <Text style={styles.headerTitle}>Calls</Text>
+          <Text style={styles.appBarTitle}>Calls</Text>
 
-          <TouchableOpacity onPress={() => setShowHistory(!showHistory)}>
+          <TouchableOpacity
+            style={styles.iconBtn}
+            activeOpacity={0.7}
+            onPress={() => setShowHistory(v => !v)}
+          >
+            {/* Clock = view full history; List = back to recent */}
             <Feather
-              name={showHistory ? 'clock' : 'phone-call'}
-              size={20}
+              name={showHistory ? 'list' : 'clock'}
+              size={19}
               color="#fff"
             />
           </TouchableOpacity>
         </View>
 
-        {/* Content */}
+        {/* ── White sheet ──────────────────────────────────────────────── */}
         <View style={styles.sheet}>
           {showHistory ? (
-            renderCallHistory()
+            /* Full history grouped by date */
+            calls.length === 0 ? (
+              <EmptyState />
+            ) : (
+              <SectionList
+                sections={sections}
+                keyExtractor={item => item.id}
+                renderItem={renderRow}
+                renderSectionHeader={({ section }) => (
+                  <View style={styles.sectionHeader}>
+                    <Text style={styles.sectionHeaderText}>
+                      {section.title}
+                    </Text>
+                  </View>
+                )}
+                ItemSeparatorComponent={() => <View style={styles.sep} />}
+                stickySectionHeadersEnabled={false}
+                showsVerticalScrollIndicator={false}
+                contentContainerStyle={{ paddingBottom: 32 }}
+                ListHeaderComponent={
+                  <View style={styles.sheetHeader}>
+                    <Text style={styles.sheetTitle}>All Calls</Text>
+                  
+                  </View>
+                }
+              />
+            )
           ) : (
-            <>
-              <Text style={styles.recent}>Recent</Text>
-              {renderCallsList()}
-            </>
+            /* Recent calls — latest 10 */
+            <FlatList
+              data={recentCalls}
+              keyExtractor={item => item.id}
+              renderItem={renderRow}
+              ItemSeparatorComponent={() => <View style={styles.sep} />}
+              showsVerticalScrollIndicator={false}
+              contentContainerStyle={{ paddingBottom: 32 }}
+              ListEmptyComponent={<EmptyState />}
+              ListHeaderComponent={
+                <View style={styles.sheetHeader}>
+                  <Text style={styles.sheetTitle}>Recent</Text>
+                  {calls.length > 10 && (
+                    <TouchableOpacity onPress={() => setShowHistory(true)}>
+                      <Text style={styles.seeAll}>See all</Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
+              }
+            />
           )}
         </View>
       </KeyboardAvoidingView>
@@ -323,203 +436,160 @@ export default function Calls() {
   );
 }
 
+// ─── Empty state ──────────────────────────────────────────────────────────────
+
+function EmptyState() {
+  return (
+    <View style={styles.empty}>
+      <View style={styles.emptyIconWrap}>
+        <Feather name="phone-off" size={32} color="#C7C7CC" />
+      </View>
+      <Text style={styles.emptyTitle}>No calls yet</Text>
+      <Text style={styles.emptySub}>Your call history will appear here</Text>
+    </View>
+  );
+}
+
+// ─── Styles ───────────────────────────────────────────────────────────────────
+
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#000',
-  },
-  header: {
-    height: 100,
+  container: { flex: 1, backgroundColor: '#000' },
+
+  // App bar
+  appBar: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 16,
+    paddingHorizontal: 20,
+    height: 100,
+    backgroundColor: '#000',
   },
-  headerTitle: {
+  appBarTitle: {
     color: '#fff',
     fontSize: 18,
-    fontWeight: '600',
+    fontWeight: '700',
+    letterSpacing: 0.1,
   },
+  iconBtn: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.25)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+
+  // White sheet
   sheet: {
     flex: 1,
     backgroundColor: '#fff',
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
-    paddingTop: 16,
+    overflow: 'hidden',
   },
-  recent: {
-    fontSize: 16,
+  sheetHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 18,
+    paddingTop: 20,
+    paddingBottom: 10,
+  },
+  sheetTitle: { fontSize: 15, fontWeight: '700', color: '#111' },
+  sheetHint: { fontSize: 12, color: '#AEAEB2' },
+  seeAll: { fontSize: 13, color: '#128C7E', fontWeight: '600' },
+
+  // Section header
+  sectionHeader: {
+    backgroundColor: '#F2F2F7',
+    paddingHorizontal: 18,
+    paddingVertical: 5,
+    marginTop: 4,
+  },
+  sectionHeaderText: {
+    fontSize: 11,
     fontWeight: '600',
-    paddingHorizontal: 16,
-    marginBottom: 8,
+    color: '#6D6D72',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
   },
+
+  // Row
   row: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
+    paddingHorizontal: 18,
+    paddingVertical: 11,
+    backgroundColor: '#fff',
   },
-  avatar: {
+  sep: {
+    height: StyleSheet.hairlineWidth,
+    backgroundColor: '#E5E5EA',
+    marginLeft: 84, // indent to avatar right edge
+  },
+
+  // Avatar + pip
+  avatarWrap: { width: 52, height: 52, marginRight: 14, position: 'relative' },
+  avatar: { width: 52, height: 52, borderRadius: 26 },
+  avatarFallback: {
     width: 52,
     height: 52,
     borderRadius: 26,
-  },
-  info: {
-    flex: 1,
-    marginLeft: 12,
-  },
-  name: {
-    fontSize: 16,
-    fontWeight: '600',
-  },
-  subRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginTop: 4,
-  },
-  subText: {
-    fontSize: 13,
-    color: '#8E8E93',
-    marginLeft: 6,
-  },
-  actions: {
-    flexDirection: 'row',
-  },
-  fixedHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: 20,
-    height: 100,
-    backgroundColor: '#000',
-  },
-  searchIcon: {
-    height: 40,
-    width: 40,
-    borderRadius: 20,
-    borderWidth: 1,
-    borderColor: '#FFF',
+    backgroundColor: '#1C1C1E',
     justifyContent: 'center',
     alignItems: 'center',
   },
+  avatarInitial: { fontSize: 22, color: '#fff', fontWeight: '700' },
+  typePip: {
+    position: 'absolute',
+    bottom: 0,
+    right: 0,
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: GREEN,
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 2,
+    borderColor: '#fff',
+  },
+  typePipMissed: { backgroundColor: RED },
 
-  // Toggle Styles
-  toggleContainer: {
-    backgroundColor: '#fff',
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    borderBottomWidth: 1,
-    borderBottomColor: '#eee',
-  },
-  toggleButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 10,
-    paddingHorizontal: 16,
-    backgroundColor: '#f0f0f0',
-    borderRadius: 20,
-  },
-  toggleButtonActive: {
-    backgroundColor: '#18b3a4',
-  },
-  toggleText: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#18b3a4',
-    marginLeft: 8,
-  },
-  toggleTextActive: {
-    color: '#fff',
-  },
+  // Info column
+  info: { flex: 1 },
+  name: { fontSize: 16, fontWeight: '600', color: '#111', marginBottom: 3 },
+  nameMissed: { color: '#111' }, // name stays black even for missed — only icon+label go red
+  subRow: { flexDirection: 'row', alignItems: 'center' },
+  subText: { fontSize: 13, color: '#636366' },
+  subTextMissed: { color: RED },
 
-  // Call History Styles
-  callHistoryContainer: {
-    flex: 1,
-    backgroundColor: '#fff',
-  },
-  callHistoryDateHeader: {
-    fontSize: 13,
-    color: '#666',
-    backgroundColor: 'rgba(0,0,0,0.05)',
-    paddingHorizontal: 16,
-    paddingVertical: 6,
-    fontWeight: '600',
-  },
-  callHistoryRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    backgroundColor: '#fff',
-  },
-  callHistoryAvatarContainer: {
-    width: 48,
-    height: 48,
-    marginRight: 12,
-  },
-  callHistoryAvatar: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-  },
-  callHistoryAvatarPlaceholder: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    backgroundColor: '#000',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  callHistoryAvatarText: {
-    fontSize: 20,
-    color: '#fff',
-    fontWeight: '600',
-  },
-  callHistoryInfo: {
-    flex: 1,
-  },
-  callHistoryName: {
-    fontSize: 18,
-    fontWeight: '600',
-    color: '#000',
-  },
-  callHistorySubRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginTop: 2,
-  },
-  callHistoryStatus: {
-    fontSize: 13,
-    color: '#666',
-    marginLeft: 6,
-  },
-  callHistoryActions: {
-    alignItems: 'flex-end',
-  },
-  callHistoryTime: {
-    fontSize: 12,
-    color: '#888',
-    marginBottom: 4,
-  },
-  callHistoryActionBtn: {
-    padding: 4,
-  },
-  emptyHistory: {
+  // Right column
+  rightCol: { alignItems: 'flex-end', gap: 6, minWidth: 56 },
+  time: { fontSize: 12, color: GREY },
+  timeMissed: { color: RED },
+
+  // Empty state
+  empty: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    paddingTop: 60,
+    paddingTop: 80,
   },
-  emptyHistoryText: {
-    fontSize: 16,
-    color: '#666',
-    marginTop: 16,
+  emptyIconWrap: {
+    width: 72,
+    height: 72,
+    borderRadius: 36,
+    backgroundColor: '#F2F2F7',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 16,
+  },
+  emptyTitle: {
+    fontSize: 17,
     fontWeight: '600',
+    color: '#3C3C43',
+    marginBottom: 6,
   },
-  emptyHistorySubtext: {
-    fontSize: 14,
-    color: '#999',
-    marginTop: 4,
-  },
+  emptySub: { fontSize: 14, color: '#AEAEB2' },
 });

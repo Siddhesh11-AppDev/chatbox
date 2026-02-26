@@ -1,14 +1,38 @@
 import firestore, { serverTimestamp } from '@react-native-firebase/firestore';
 import { CallHistoryItem } from '../../features/chat/UserMessage';
 
+// ─── Architecture note ────────────────────────────────────────────────────────
+//
+//  Each call produces TWO independent Firestore docs — one per participant —
+//  each storing ONLY that user's perspective via `ownerId`.
+//
+//  Why? Because `participants array-contains` queries return records visible
+//  to BOTH users, causing duplicates in each user's list. Querying by `ownerId`
+//  (a single-field equality) requires no composite index and gives each user
+//  exactly one record per call, with a status that reflects their role:
+//
+//   Caller  saves: { ownerId: callerUid, callStatus: 'outgoing' | 'missed' }
+//   Callee  saves: { ownerId: calleeUid, callStatus: 'received' | 'missed' | 'rejected' }
+//
+//  Legacy records (pre-migration) are fetched via the old participants query
+//  and de-duplicated before returning.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type CallHistoryRecord = CallHistoryItem & { ownerId: string };
+
 class CallHistoryService {
+  // ── Save ──────────────────────────────────────────────────────────────────
+
   /**
-   * Save a call record to Firestore
+   * Persist a single call record for one participant.
+   * Call this once per user side (caller and callee each call it independently).
    */
-  async saveCallRecord(callRecord: Omit<CallHistoryItem, 'id' | 'timestamp'>) {
+  async saveCallRecord(
+    callRecord: Omit<CallHistoryItem, 'id' | 'timestamp'> & { ownerId?: string },
+  ): Promise<string> {
     try {
       const callId = `call_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-      
+
       await firestore()
         .collection('callHistory')
         .doc(callId)
@@ -17,8 +41,8 @@ class CallHistoryService {
           id: callId,
           timestamp: serverTimestamp(),
         });
-      
-      console.log('✅ Call record saved:', callId);
+
+      console.log('✅ Call record saved:', callId, callRecord.callStatus, '→', callRecord.ownerId);
       return callId;
     } catch (error) {
       console.error('❌ Error saving call record:', error);
@@ -26,36 +50,60 @@ class CallHistoryService {
     }
   }
 
+  // ── Query helpers ─────────────────────────────────────────────────────────
+
+  private parseTimestamp(ts: any): Date {
+    if (!ts) return new Date(0);
+    if (ts.toDate) return ts.toDate();
+    if (ts instanceof Date) return ts;
+    if (ts._seconds) return new Date(ts._seconds * 1000);
+    return new Date(0);
+  }
+
+  private sortDesc(calls: CallHistoryItem[]): CallHistoryItem[] {
+    return calls.sort(
+      (a, b) =>
+        this.parseTimestamp(b.timestamp).getTime() -
+        this.parseTimestamp(a.timestamp).getTime(),
+    );
+  }
+
+  // ── Get ───────────────────────────────────────────────────────────────────
+
   /**
-   * Get call history for a specific user
-   * Using collection group query to avoid composite index requirement
+   * One-shot fetch of a user's call history.
+   * Merges new ownerId records with legacy participants records, de-duplicated.
    */
-  async getCallHistory(userId: string, limit: number = 20): Promise<CallHistoryItem[]> {
+  async getCallHistory(userId: string, limit = 20): Promise<CallHistoryItem[]> {
     try {
-      // First, get all call records (without ordering)
-      const snapshot = await firestore()
-        .collection('callHistory')
-        .where('participants', 'array-contains', userId)
-        .limit(limit * 2) // Get more to account for sorting
-        .get();
+      const [newSnap, legacySnap] = await Promise.all([
+        // New-style: exact user records
+        firestore()
+          .collection('callHistory')
+          .where('ownerId', '==', userId)
+          .limit(limit * 2)
+          .get(),
+        // Legacy-style: pre-migration records (participants array)
+        firestore()
+          .collection('callHistory')
+          .where('participants', 'array-contains', userId)
+          .limit(limit * 2)
+          .get(),
+      ]);
 
+      const seenIds = new Set<string>();
       const calls: CallHistoryItem[] = [];
-      snapshot.forEach(doc => {
-        calls.push({
-          id: doc.id,
-          ...doc.data(),
-        } as CallHistoryItem);
-      });
 
-      // Sort by timestamp manually
-      calls.sort((a, b) => {
-        const timeA = a.timestamp?.toDate?.() || a.timestamp || new Date(0);
-        const timeB = b.timestamp?.toDate?.() || b.timestamp || new Date(0);
-        return new Date(timeB).getTime() - new Date(timeA).getTime();
-      });
+      const addDoc = (doc: any) => {
+        if (seenIds.has(doc.id)) return;
+        seenIds.add(doc.id);
+        calls.push({ id: doc.id, ...doc.data() } as CallHistoryItem);
+      };
 
-      // Return only the requested limit
-      return calls.slice(0, limit);
+      newSnap.forEach(addDoc);
+      legacySnap.forEach(addDoc);
+
+      return this.sortDesc(calls).slice(0, limit);
     } catch (error) {
       console.error('❌ Error fetching call history:', error);
       return [];
@@ -63,89 +111,61 @@ class CallHistoryService {
   }
 
   /**
-   * Get recent calls (last 24 hours) for a user
-   * Using client-side filtering to avoid composite index requirement
+   * Fetch calls from the last N hours for a user.
    */
-  async getRecentCalls(userId: string, hours: number = 24): Promise<CallHistoryItem[]> {
+  async getRecentCalls(userId: string, hours = 24): Promise<CallHistoryItem[]> {
     try {
-      const cutoff = new Date();
-      cutoff.setHours(cutoff.getHours() - hours);
+      const cutoff = new Date(Date.now() - hours * 60 * 60 * 1000);
 
-      // Get all calls for user (without timestamp filter)
-      const snapshot = await firestore()
+      const snap = await firestore()
         .collection('callHistory')
-        .where('participants', 'array-contains', userId)
+        .where('ownerId', '==', userId)
         .get();
 
       const calls: CallHistoryItem[] = [];
-      snapshot.forEach(doc => {
-        const callData = {
-          id: doc.id,
-          ...doc.data(),
-        } as CallHistoryItem;
-        
-        // Filter by timestamp on client side
-        const callTime = callData.timestamp?.toDate?.() || callData.timestamp;
-        if (callTime && new Date(callTime) >= cutoff) {
-          calls.push(callData);
-        }
+      snap.forEach(doc => {
+        const data = { id: doc.id, ...doc.data() } as CallHistoryItem;
+        if (this.parseTimestamp(data.timestamp) >= cutoff) calls.push(data);
       });
 
-      // Sort by timestamp
-      calls.sort((a, b) => {
-        const timeA = a.timestamp?.toDate?.() || a.timestamp || new Date(0);
-        const timeB = b.timestamp?.toDate?.() || b.timestamp || new Date(0);
-        return new Date(timeB).getTime() - new Date(timeA).getTime();
-      });
-
-      return calls;
+      return this.sortDesc(calls);
     } catch (error) {
       console.error('❌ Error fetching recent calls:', error);
       return [];
     }
   }
 
-  /**
-   * Listen to real-time call history updates
-   * Using manual sorting to avoid composite index requirement
-   */
-  listenToCallHistory(userId: string, callback: (calls: CallHistoryItem[]) => void) {
-    return firestore()
-      .collection('callHistory')
-      .where('participants', 'array-contains', userId)
-      .limit(40) // Get more to account for sorting
-      .onSnapshot(snapshot => {
-        const calls: CallHistoryItem[] = [];
-        snapshot.forEach(doc => {
-          calls.push({
-            id: doc.id,
-            ...doc.data(),
-          } as CallHistoryItem);
-        });
-        
-        // Sort by timestamp manually
-        calls.sort((a, b) => {
-          const timeA = a.timestamp?.toDate?.() || a.timestamp || new Date(0);
-          const timeB = b.timestamp?.toDate?.() || b.timestamp || new Date(0);
-          return new Date(timeB).getTime() - new Date(timeA).getTime();
-        });
-        
-        // Return only first 20 items
-        callback(calls.slice(0, 20));
-      }, error => {
-        console.error('❌ Call history listener error:', error);
-      });
-  }
+  // ── Real-time listener ────────────────────────────────────────────────────
 
   /**
-   * Delete a call record
+   * Subscribe to real-time call history for a user.
+   * Returns the unsubscribe function.
    */
-  async deleteCallRecord(callId: string) {
+  listenToCallHistory(
+    userId: string,
+    callback: (calls: CallHistoryItem[]) => void,
+  ): () => void {
+    return firestore()
+      .collection('callHistory')
+      .where('ownerId', '==', userId)
+      .limit(50) // over-fetch so client-side sort covers all recent calls
+      .onSnapshot(
+        snap => {
+          const calls: CallHistoryItem[] = [];
+          snap.forEach(doc =>
+            calls.push({ id: doc.id, ...doc.data() } as CallHistoryItem),
+          );
+          callback(this.sortDesc(calls).slice(0, 25));
+        },
+        error => console.error('❌ Call history listener error:', error),
+      );
+  }
+
+  // ── Mutations ─────────────────────────────────────────────────────────────
+
+  async deleteCallRecord(callId: string): Promise<void> {
     try {
-      await firestore()
-        .collection('callHistory')
-        .doc(callId)
-        .delete();
+      await firestore().collection('callHistory').doc(callId).delete();
       console.log('✅ Call record deleted:', callId);
     } catch (error) {
       console.error('❌ Error deleting call record:', error);
@@ -153,21 +173,15 @@ class CallHistoryService {
     }
   }
 
-  /**
-   * Clear all call history for a user
-   */
-  async clearCallHistory(userId: string) {
+  async clearCallHistory(userId: string): Promise<void> {
     try {
-      const snapshot = await firestore()
+      const snap = await firestore()
         .collection('callHistory')
-        .where('participants', 'array-contains', userId)
+        .where('ownerId', '==', userId)
         .get();
 
       const batch = firestore().batch();
-      snapshot.forEach(doc => {
-        batch.delete(doc.ref);
-      });
-
+      snap.forEach(doc => batch.delete(doc.ref));
       await batch.commit();
       console.log('✅ Call history cleared for user:', userId);
     } catch (error) {

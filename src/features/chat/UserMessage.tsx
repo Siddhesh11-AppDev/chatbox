@@ -60,6 +60,9 @@ interface Message {
 
 export interface CallHistoryItem {
   id: string;
+  /** UID of the user this record belongs to. Enables per-user Firestore queries
+   *  without a composite index. Optional only for legacy records pre-migration. */
+  ownerId?: string;
   participants: string[];
   callerId: string;
   calleeId: string;
@@ -68,6 +71,8 @@ export interface CallHistoryItem {
   callerAvatar?: string;
   calleeAvatar?: string;
   callType: 'audio' | 'video';
+  /** Caller saves: 'outgoing' | 'missed'
+   *  Callee saves: 'received' | 'missed' | 'rejected' */
   callStatus: 'missed' | 'received' | 'rejected' | 'completed' | 'outgoing';
   duration?: number; // in seconds
   timestamp: any;
@@ -691,13 +696,21 @@ const UserMessage = ({ route }: Props) => {
 
   // ─── Call History Helpers ──────────────────────────────────────────────────────
   const getCallIcon = (callType: 'audio' | 'video', callStatus: string) => {
-    if (callStatus === 'missed') return 'phone-missed';
-    if (callStatus === 'rejected') return 'phone-missed';
-    if (callStatus === 'outgoing') {
-      return callType === 'audio' ? 'arrow-up-right' : 'arrow-up-right';
-    }
-    return callType === 'audio' ? 'phone' : 'video';
-  };
+  if (callStatus === 'missed') {
+    // Show different icons for audio vs video missed calls
+    return callType === 'audio' ? 'phone-missed' : 'video-off';
+  }
+  if (callStatus === 'rejected') {
+    // Show different icons for audio vs video rejected calls
+    return callType === 'audio' ? 'phone-missed' : 'video-off';
+  }
+  if (callStatus === 'outgoing') {
+    // Show different icons for audio vs video outgoing calls
+    return callType === 'audio' ? 'arrow-up-right' : 'arrow-up-right'; // You might want different icons here
+  }
+  // For received/completed calls
+  return callType === 'audio' ? 'phone' : 'video';
+};
 
   const getCallIconColor = (callStatus: string) => {
     if (callStatus === 'missed' || callStatus === 'rejected') return '#FF3B30';
@@ -738,16 +751,16 @@ const UserMessage = ({ route }: Props) => {
   };
 
   const getCallStatusText = (callStatus: string, callType: string) => {
-    if (callStatus === 'missed') return 'Missed call';
-    if (callStatus === 'rejected') return 'Rejected call';
+    if (callStatus === 'missed') return 'Missed  call';
+    if (callStatus === 'rejected') return 'Rejected  call';
     if (callStatus === 'outgoing') return `Outgoing ${callType} call`;
     if (callStatus === 'received') return `Incoming ${callType} call`;
     return `${callType} call`;
   };
 
   const getChatCallStatusText = (callStatus: string, callType: string, isCurrentUserCaller: boolean) => {
-    if (callStatus === 'missed') return 'Missed call';
-    if (callStatus === 'rejected') return 'Rejected call';
+    if (callStatus === 'missed') return 'Missed ' + callType + ' call';
+    if (callStatus === 'rejected') return 'Rejected ' + callType + ' call';
     if (callStatus === 'outgoing') return isCurrentUserCaller ? `Outgoing ${callType} call` : `Incoming ${callType} call`;
     if (callStatus === 'received') return isCurrentUserCaller ? `Incoming ${callType} call` : `Outgoing ${callType} call`;
     // For completed calls, determine from current user's perspective

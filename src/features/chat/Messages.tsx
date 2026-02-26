@@ -47,6 +47,9 @@ import {
 } from '../../core/services/stories.service';
 import { launchCamera, launchImageLibrary } from 'react-native-image-picker';
 import ImageResizer from 'react-native-image-resizer';
+// ── Call history integration ──────────────────────────────────────────────────
+import { callHistoryService } from '../../core/services/callHistory.service';
+import { CallHistoryItem } from '../chat/UserMessage';
 
 type MessagesNavigationProp = NativeStackNavigationProp<
   AppStackParamList,
@@ -63,6 +66,84 @@ interface User {
   last_message_time?: any;
   unread_count?: number;
   deleted_for_user?: boolean;
+}
+
+// ─── Call-to-last-message formatting ─────────────────────────────────────────
+//
+//  Mirrors WhatsApp's conversation list preview for calls:
+//    📞 Outgoing voice call · 0:42
+//    📹 Incoming video call · 2:15
+//    📞 Missed call              ← shown in red in the row (handled via isMissedCall)
+//    📞 No answer
+//
+// ─────────────────────────────────────────────────────────────────────────────
+
+function fmtDuration(secs: number): string {
+  const m = Math.floor(secs / 60);
+  const s = secs % 60;
+  return `${m}:${s.toString().padStart(2, '0')}`;
+}
+
+/**
+ * Returns a formatted string for displaying a call as the "last message"
+ * in the conversation list.
+ *
+ * The callStatus already encodes the viewer's perspective (outgoing/received/
+ * missed/rejected) because we fixed the recording logic in VideoCall/VoiceCall.
+ * We only fall back to callerId comparison for legacy 'completed' records.
+ */
+function formatCallPreview(call: CallHistoryItem, currentUserId: string): string {
+  const isVideo = call.callType === 'video';
+  const typeLabel = isVideo ? 'video' : 'voice';
+  const dur = call.duration && call.duration > 0
+    ? `  ·  ${fmtDuration(call.duration)}`
+    : '';
+
+  switch (call.callStatus) {
+    case 'outgoing':
+      return ` Outgoing ${typeLabel} call${dur}`;
+
+    case 'received':
+      return ` Incoming ${typeLabel} call${dur}`;
+
+    case 'missed':
+      // From the caller's POV: "No answer" (they called, no one picked up)
+      // From the callee's POV: "Missed call" (they missed it)
+      return call.callerId === currentUserId
+        ? ` Missed Video call`
+        : ` Missed Video call`;
+
+    case 'rejected':
+      // Callee deliberately declined — their history shows "Missed call"
+      return ` Missed call`;
+
+    // Legacy 'completed' records (pre-ownerId migration)
+    case 'completed': {
+      const isCaller = call.callerId === currentUserId;
+      return isCaller
+        ? ` Outgoing ${typeLabel} call${dur}`
+        : ` Incoming ${typeLabel} call${dur}`;
+    }
+
+    default:
+      return ` Call`;
+  }
+}
+
+/** True when the call was a missed/rejected call from the viewer's perspective. */
+function isMissedCall(call: CallHistoryItem, currentUserId: string): boolean {
+  if (call.callStatus === 'rejected') return true;
+  if (call.callStatus === 'missed') return true;
+  return false;
+}
+
+/** Parse any Firestore-compatible timestamp into ms-since-epoch (or 0). */
+function toMs(ts: any): number {
+  if (!ts) return 0;
+  if (typeof ts.toDate === 'function') return ts.toDate().getTime();
+  if (ts instanceof Date) return ts.getTime();
+  if (ts._seconds) return ts._seconds * 1000;
+  return 0;
 }
 
 const Messages = () => {
@@ -83,6 +164,11 @@ const Messages = () => {
   const [lastMessages, setLastMessages] = useState<{ [key: string]: string }>(
     {},
   );
+  // ── NEW: store chat message timestamps so we can rank against call timestamps
+  const [lastMessageTimestamps, setLastMessageTimestamps] = useState<{ [key: string]: number }>({});
+  // ── NEW: most-recent call record keyed by the OTHER user's uid
+  const [lastCalls, setLastCalls] = useState<{ [key: string]: CallHistoryItem }>({});
+
   const [refreshing, setRefreshing] = useState(false);
   const [storySheetVisible, setStorySheetVisible] = useState(false);
   const [isUploadingStory, setIsUploadingStory] = useState(false);
@@ -301,6 +387,7 @@ const Messages = () => {
   }, [conversationUsers, user, users]);
 
   // Set up listeners for last messages
+  // ── PATCHED: also captures timestamp so we can compare with call records ──
   useEffect(() => {
     if (!user) return;
 
@@ -320,9 +407,16 @@ const Messages = () => {
         if (!snapshot.empty) {
           const lastMessageDoc = snapshot.docs[0];
           const messageData = lastMessageDoc.data();
+
           setLastMessages(prev => ({
             ...prev,
             [u.uid]: messageData.text || '',
+          }));
+
+          // ── NEW: capture the timestamp for ranking against calls
+          setLastMessageTimestamps(prev => ({
+            ...prev,
+            [u.uid]: toMs(messageData.timestamp),
           }));
 
           // Check if this user should be in conversation list but isn't
@@ -338,6 +432,10 @@ const Messages = () => {
             ...prev,
             [u.uid]: '',
           }));
+          setLastMessageTimestamps(prev => ({
+            ...prev,
+            [u.uid]: 0,
+          }));
         }
       });
 
@@ -348,6 +446,43 @@ const Messages = () => {
       unsubs.forEach(unsub => unsub());
     };
   }, [conversationUsers, user, users]);
+
+  // ── NEW: Real-time listener for call history → populate lastCalls map ──────
+  //
+  //  We listen to the current user's own call history records (queried by
+  //  ownerId). For each record we build a map: otherUserId → latestCallRecord.
+  //  "Other user" is always the person on the opposite side of the call.
+  //  Only the most-recent call per conversation partner is kept.
+  //
+  //  This runs independently of the chat listeners so calls appear even if
+  //  there are no chat messages between the two users (pure-call conversations).
+  // ─────────────────────────────────────────────────────────────────────────
+  useEffect(() => {
+    if (!user) return;
+
+    const unsubscribe = callHistoryService.listenToCallHistory(
+      user.uid,
+      (calls: CallHistoryItem[]) => {
+        // Build map: otherUserId → most recent call record
+        // listenToCallHistory already returns records sorted newest-first,
+        // so the first record for each partner wins.
+        const callMap: { [otherId: string]: CallHistoryItem } = {};
+
+        calls.forEach(call => {
+          const otherId =
+            call.callerId === user.uid ? call.calleeId : call.callerId;
+          // Only store if not already set (first = most recent due to sort)
+          if (!callMap[otherId]) {
+            callMap[otherId] = call;
+          }
+        });
+
+        setLastCalls(callMap);
+      },
+    );
+
+    return unsubscribe;
+  }, [user]);
 
   // Delete conversation function - unilateral deletion for current user
   // This removes all conversation data for the current user but keeps it for the other user
@@ -416,6 +551,19 @@ const Messages = () => {
                 return newMessages;
               });
 
+              setLastMessageTimestamps(prev => {
+                const next = { ...prev };
+                delete next[targetUser.uid];
+                return next;
+              });
+
+              // Also clear cached call preview for this user
+              setLastCalls(prev => {
+                const next = { ...prev };
+                delete next[targetUser.uid];
+                return next;
+              });
+
               console.log(
                 `Conversation with ${targetUser.name} deleted for current user`,
               );
@@ -436,13 +584,42 @@ const Messages = () => {
     return unreadCounts[userId] || 0;
   };
 
-  const getLastMessage = (userId: string) => {
-    const lastMsg = lastMessages[userId];
-    if (lastMsg) {
-      return lastMsg;
+  // ── PATCHED: getLastMessage ───────────────────────────────────────────────
+  //
+  //  Now compares the timestamp of the most recent chat message against the
+  //  most recent call for that conversation partner, and returns whichever is
+  //  more recent.
+  //
+  //  Behaviour mirrors WhatsApp:
+  //    • Text/image message more recent → show message preview
+  //    • Call more recent               → show call preview (e.g. "📞 Missed call")
+  //    • No message or call yet         → show "Tap to start chatting"
+  //
+  const getLastMessage = (userId: string): { text: string; isMissed: boolean } => {
+    const chatText      = lastMessages[userId] || '';
+    const chatTimestamp = lastMessageTimestamps[userId] || 0;
+    const callRecord    = lastCalls[userId];
+    const callTimestamp = callRecord ? toMs(callRecord.timestamp) : 0;
+
+    // Call is more recent than the last chat message
+    if (callRecord && callTimestamp >= chatTimestamp) {
+      return {
+        text: formatCallPreview(callRecord, user?.uid ?? ''),
+        isMissed: isMissedCall(callRecord, user?.uid ?? ''),
+      };
     }
+
+    // Chat message is more recent (or no calls exist)
+    if (chatText) {
+      return { text: chatText, isMissed: false };
+    }
+
+    // Legacy fallback: Firestore user doc field
     const userObj = conversationUsers.find(u => u.uid === userId);
-    return userObj?.last_message || 'Tap to start chatting';
+    const legacy  = userObj?.last_message;
+    if (legacy) return { text: legacy, isMissed: false };
+
+    return { text: 'Tap to start chatting', isMissed: false };
   };
 
   const renderRightActions = (item: User) => (
@@ -838,12 +1015,6 @@ const Messages = () => {
 
           <Animated.View style={{ opacity: searchOpacity, flex: 1 }}>
             <View style={styles.searchBarContainer}>
-              {/* <Feather
-                name="search"
-                size={20}
-                color="#000"
-                style={styles.searchIconInBar}
-              /> */}
               <TextInput
                 placeholder="Search users..."
                 placeholderTextColor="#999"
@@ -926,15 +1097,6 @@ const Messages = () => {
                       </View>
                     </View>
                   </TouchableOpacity>
-                  {/* {hasActiveStories && (
-                    <TouchableOpacity
-                      style={styles.addStoryBadge}
-                      onPress={handleAddStory}
-                      activeOpacity={0.8}
-                    >
-                      <Feather name="plus" size={12} color="#FFF" />
-                    </TouchableOpacity>
-                  )} */}
                   <Text style={styles.storyName} numberOfLines={1}>
                     {hasActiveStories ? 'Your Story' : 'Add Story'}
                   </Text>
@@ -956,7 +1118,6 @@ const Messages = () => {
               <TouchableOpacity
                 style={styles.storyItem}
                 onPress={() => {
-                  // When clicking on other users, show only their stories
                   console.log('Clicked on story user:', storyUser);
                   console.log('Stories count:', storyUser.stories?.length || 0);
                   console.log('Stories data:', storyUser.stories);
@@ -1040,42 +1201,57 @@ const Messages = () => {
         )}
         onRefresh={onRefresh}
         refreshing={refreshing}
-        renderItem={({ item }) => (
-          <Swipeable renderRightActions={() => renderRightActions(item)}>
-            <TouchableOpacity
-              style={styles.messageItem}
-              onPress={() => handleMessagePress(item)}
-            >
-              <View style={styles.avatarContainer}>
-                <View style={styles.avatar}>
-                  <Text style={styles.avatarText}>{item.name?.charAt(0)}</Text>
+        renderItem={({ item }) => {
+          // ── PATCHED: destructure the new getLastMessage return value ──────
+          const { text: lastMsgText, isMissed: lastMsgIsMissed } = getLastMessage(item.uid);
+
+          // Determine the display text (image/audio preview takes priority)
+          const displayText = lastMsgText.startsWith('image:')
+            ? '📷 Image'
+            : lastMsgText.includes('base64')
+            ? '📷 Image'
+            : lastMsgText;
+
+          return (
+            <Swipeable renderRightActions={() => renderRightActions(item)}>
+              <TouchableOpacity
+                style={styles.messageItem}
+                onPress={() => handleMessagePress(item)}
+              >
+                <View style={styles.avatarContainer}>
+                  <View style={styles.avatar}>
+                    <Text style={styles.avatarText}>{item.name?.charAt(0)}</Text>
+                  </View>
+                  {item.online && <View style={styles.greenDot} />}
                 </View>
-                {item.online && <View style={styles.greenDot} />}
-              </View>
 
-              <View style={styles.messageContent}>
-                <Text style={styles.contactName}>{item.name}</Text>
-                <Text style={styles.lastMessage} numberOfLines={1}>
-                  {getLastMessage(item.uid)?.startsWith('image:')
-                    ? '📷 Image'
-                    : getLastMessage(item.uid)?.includes('base64')
-                    ? '📷 Image'
-                    : getLastMessage(item.uid)}
-                </Text>
-              </View>
-
-              {getUnreadCount(item.uid) > 0 && (
-                <View style={styles.unreadBadge}>
-                  <Text style={styles.unreadCount}>
-                    {getUnreadCount(item.uid) > 9
-                      ? '9+'
-                      : getUnreadCount(item.uid)}
+                <View style={styles.messageContent}>
+                  <Text style={styles.contactName}>{item.name}</Text>
+                  {/* ── PATCHED: missed calls shown in red ── */}
+                  <Text
+                    style={[
+                      styles.lastMessage,
+                      lastMsgIsMissed && styles.lastMessageMissed,
+                    ]}
+                    numberOfLines={1}
+                  >
+                    {displayText}
                   </Text>
                 </View>
-              )}
-            </TouchableOpacity>
-          </Swipeable>
-        )}
+
+                {getUnreadCount(item.uid) > 0 && (
+                  <View style={styles.unreadBadge}>
+                    <Text style={styles.unreadCount}>
+                      {getUnreadCount(item.uid) > 9
+                        ? '9+'
+                        : getUnreadCount(item.uid)}
+                    </Text>
+                  </View>
+                )}
+              </TouchableOpacity>
+            </Swipeable>
+          );
+        }}
         ListEmptyComponent={() => (
           <View style={styles.emptyListContainer}>
             <View style={styles.emptyUserIcon}>
@@ -1656,7 +1832,6 @@ const styles = StyleSheet.create({
   },
   searchInput: {
     flex: 1,
-    // marginLeft: 10,
     marginRight: 10,
     color: '#000',
     fontSize: 16,
@@ -1721,8 +1896,6 @@ const styles = StyleSheet.create({
   listContent: {
     backgroundColor: '#FFF',
     flex: 1,
-   
-
   },
   messageItem: {
     flexDirection: 'row',
@@ -1758,7 +1931,6 @@ const styles = StyleSheet.create({
   },
   messageContent: {
     flex: 1,
-   
   },
   contactName: {
     fontSize: 16,
@@ -1768,6 +1940,11 @@ const styles = StyleSheet.create({
   lastMessage: {
     fontSize: 14,
     color: '#666',
+  },
+  // ── NEW: missed/rejected calls shown in red, matching WhatsApp ────────────
+  lastMessageMissed: {
+    color: '#FF3B30',
+    fontWeight: '500',
   },
   unreadBadge: {
     backgroundColor: '#F04A4C',
@@ -1858,7 +2035,6 @@ const styles = StyleSheet.create({
     width: 22,
     height: 22,
     borderRadius: 11,
-   
     justifyContent: 'center',
     alignItems: 'center',
     borderWidth: 2,
@@ -1902,19 +2078,6 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     marginLeft: 5,
   },
-  // addStoryBadge: {
-  //   position: 'absolute',
-  //   bottom: 20,
-  //   right: 2,
-  //   width: 22,
-  //   height: 22,
-  //   borderRadius: 11,
-  //   backgroundColor: '#E1306C',
-  //   justifyContent: 'center',
-  //   alignItems: 'center',
-  //   borderWidth: 2,
-  //   borderColor: '#FFF',
-  // },
 });
 
 // Story picker bottom sheet styles (separate StyleSheet for clarity)
