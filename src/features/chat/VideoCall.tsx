@@ -492,24 +492,7 @@ const VideoCall = () => {
       localStreamRef.current = null;
     }
 
-    // ── Save this user's call history record ──────────────────────────────
-    //
-    // Status decision tree (mirrors WhatsApp behaviour):
-    //
-    //  CALLER perspective (isCallerRef.current === true):
-    //    callWasAnswered=true  →  'outgoing'   (call went through)
-    //    callWasAnswered=false →  'missed'     (no answer / declined — same from caller's POV)
-    //
-    //  CALLEE perspective (isCallerRef.current === false):
-    //    callWasAnswered=true  →  'received'   (they picked up)
-    //    callWasAnswered=false →  'missed'     (caller hung up before they could answer)
-    //
-    //  NOTE: If the callee actively tapped Decline in IncomingCallScreen, the
-    //  callee's record is saved there (with status='rejected') and
-    //  callWasAnsweredRef stays false here, so the caller sees 'missed'. ✓
-    //
-    //  Each side stores its OWN record with ownerId=user.uid so the Firestore
-    //  query (`ownerId == userId`) returns exactly one record per call.
+
     try {
       if (user && userData) {
         const isCaller = isCallerRef.current;
@@ -554,7 +537,8 @@ const VideoCall = () => {
 
   const endCall = async () => {
     await doCleanup();
-    navigation.navigate('userMsg', { userData });
+    navigation.goBack(); 
+    navigation.navigate('userMsg', { userData }) 
   };
 
   const toggleMute = () => {

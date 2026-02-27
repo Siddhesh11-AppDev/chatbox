@@ -503,6 +503,7 @@ const VoiceCall = () => {
 
   const endCall = async () => {
     await doCleanup();
+    navigation.goBack();
     navigation.navigate('userMsg', { userData });
   };
 
